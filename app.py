@@ -4,58 +4,77 @@ import shutil
 from PIL import Image
 from io import BytesIO
 
-st.set_page_config(layout="wide", page_title="Universal Image Sorter")
+st.set_page_config(layout="wide", page_title="ID-Based Image Sorter")
 
-# --- UI Sidebar ---
-st.sidebar.header("📁 Select Folders")
-st.sidebar.info("Base path is set to /storage (your Unraid mount)")
+BASE_PATH = "/storage"
 
-# User types the subpath relative to the mount, or the full container path
-path_a = st.sidebar.text_input("Path to Folder 1", value="/storage/Photos/FolderA")
-path_b = st.sidebar.text_input("Path to Folder 2", value="/storage/Photos/FolderB")
+# --- Sidebar ---
+st.sidebar.header("📁 Folder Selection")
+def get_subfolders(directory):
+    try:
+        return sorted([d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))])
+    except: return []
 
-comp_level = st.sidebar.slider("Bandwidth Compression", 5, 100, 40)
+subfolders = get_subfolders(BASE_PATH)
+folder_a_name = st.sidebar.selectbox("Select Folder 1", subfolders)
+folder_b_name = st.sidebar.selectbox("Select Folder 2", subfolders)
+comp_level = st.sidebar.slider("Compression (Quality)", 5, 100, 40)
 
-# --- Logic to find matching files ---
-def get_files(p):
-    if os.path.exists(p):
-        return [f for f in os.listdir(p) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    return []
+path_a = os.path.join(BASE_PATH, folder_a_name) if folder_a_name else ""
+path_b = os.path.join(BASE_PATH, folder_b_name) if folder_b_name else ""
 
-files_a = get_files(path_a)
-files_b = get_files(path_b)
-common = sorted(list(set(files_a) & set(files_b)))
+# --- ID Matching Logic ---
+def get_id_map(path):
+    mapping = {}
+    if not path or not os.path.exists(path): return mapping
+    for f in os.listdir(path):
+        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+            # Extracts 'id001' from 'id001_example.jpg'
+            prefix = f.split('_')[0]
+            mapping[prefix] = f
+    return mapping
+
+map_a = get_id_map(path_a)
+map_b = get_id_map(path_b)
+common_ids = sorted(list(set(map_a.keys()) & set(map_b.keys())))
 
 if 'idx' not in st.session_state:
     st.session_state.idx = 0
 
-# --- File Operations ---
-def handle_click(action):
-    current_file = common[st.session_state.idx]
-    if action == "move":
-        for p in [path_a, path_b]:
-            target = os.path.join(p, "unused")
-            os.makedirs(target, exist_ok=True)
-            shutil.move(os.path.join(p, current_file), os.path.join(target, current_file))
+def move_files(prefix):
+    for path, mapping in [(path_a, map_a), (path_b, map_b)]:
+        filename = mapping[prefix]
+        target_dir = os.path.join(path, "unused")
+        os.makedirs(target_dir, exist_ok=True)
+        shutil.move(os.path.join(path, filename), os.path.join(target_dir, filename))
     st.session_state.idx += 1
 
-# --- Layout ---
-if not common:
-    st.warning("No matching files found. Check your paths.")
-elif st.session_state.idx >= len(common):
-    st.success("Finished all images!")
+# --- Main UI ---
+if not common_ids:
+    st.info("No matching IDs found (e.g., 'id001_') between these folders.")
+elif st.session_state.idx >= len(common_ids):
+    st.success("All matched IDs processed!")
     if st.button("Reset"): st.session_state.idx = 0
 else:
-    fname = common[st.session_state.idx]
-    st.write(f"**Current Image:** {fname} ({st.session_state.idx+1}/{len(common)})")
-    
+    current_id = common_ids[st.session_state.idx]
+    file_a = map_a[current_id]
+    file_b = map_b[current_id]
+
+    st.write(f"### Current ID: `{current_id}`")
+    st.caption(f"Progress: {st.session_state.idx + 1} / {len(common_ids)}")
+
     col1, col2 = st.columns(2)
-    for i, p in enumerate([path_a, path_b]):
-        with Image.open(os.path.join(p, fname)) as img:
+    for i, (p, f) in enumerate([(path_a, file_a), (path_b, file_b)]):
+        with Image.open(os.path.join(p, f)) as img:
             buf = BytesIO()
             img.convert("RGB").save(buf, format="JPEG", quality=comp_level)
-            (col1 if i==0 else col2).image(buf, use_container_width=True)
+            (col1 if i==0 else col2).image(buf, use_container_width=True, caption=f)
 
-    c1, c2 = st.columns(2)
-    c1.button("❌ Move to Unused", on_click=handle_click, args=("move",), use_container_width=True)
-    c2.button("✅ Keep Both", on_click=handle_click, args=("keep",), use_container_width=True)
+    st.divider()
+    c1, c2, c3 = st.columns([1, 1, 1])
+    if c1.button("❌ Move ID to Unused", use_container_width=True):
+        move_files(current_id)
+        st.rerun()
+    if c3.button("✅ Keep Both", use_container_width=True):
+        st.session_state.idx += 1
+        st.rerun()
