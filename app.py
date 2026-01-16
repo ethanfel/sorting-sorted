@@ -1,59 +1,61 @@
 import streamlit as st
 import os
-from PIL import Image
 import shutil
+from PIL import Image
 from io import BytesIO
 
-st.set_page_config(layout="wide", page_title="Unraid Image Sorter")
+st.set_page_config(layout="wide", page_title="Universal Image Sorter")
 
 # --- UI Sidebar ---
-st.sidebar.header("📁 Folder Configuration")
-# These paths should match your Unraid Container Path mappings
-path_a = st.sidebar.text_input("Folder A (Internal Path)", value="/media/folder1")
-path_b = st.sidebar.text_input("Folder B (Internal Path)", value="/media/folder2")
-quality = st.sidebar.slider("Bandwidth Compression (Quality)", 5, 100, 40)
+st.sidebar.header("📁 Select Folders")
+st.sidebar.info("Base path is set to /storage (your Unraid mount)")
 
-def get_valid_files(path):
-    if not os.path.exists(path): return []
-    return [f for f in os.listdir(path) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+# User types the subpath relative to the mount, or the full container path
+path_a = st.sidebar.text_input("Path to Folder 1", value="/storage/Photos/FolderA")
+path_b = st.sidebar.text_input("Path to Folder 2", value="/storage/Photos/FolderB")
 
-files_a = get_valid_files(path_a)
-files_b = get_valid_files(path_b)
+comp_level = st.sidebar.slider("Bandwidth Compression", 5, 100, 40)
+
+# --- Logic to find matching files ---
+def get_files(p):
+    if os.path.exists(p):
+        return [f for f in os.listdir(p) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    return []
+
+files_a = get_files(path_a)
+files_b = get_files(path_b)
 common = sorted(list(set(files_a) & set(files_b)))
 
 if 'idx' not in st.session_state:
     st.session_state.idx = 0
 
-# --- Action Logic ---
-def process_files(action, filename):
+# --- File Operations ---
+def handle_click(action):
+    current_file = common[st.session_state.idx]
     if action == "move":
-        for base_path in [path_a, path_b]:
-            target_dir = os.path.join(base_path, "unused")
-            os.makedirs(target_dir, exist_ok=True)
-            shutil.move(os.path.join(base_path, filename), os.path.join(target_dir, filename))
-        st.toast(f"Moved {filename} to unused")
-    else:
-        st.toast(f"Kept {filename}")
-    
+        for p in [path_a, path_b]:
+            target = os.path.join(p, "unused")
+            os.makedirs(target, exist_ok=True)
+            shutil.move(os.path.join(p, current_file), os.path.join(target, current_file))
     st.session_state.idx += 1
 
-# --- Display Logic ---
-if st.session_state.idx < len(common):
+# --- Layout ---
+if not common:
+    st.warning("No matching files found. Check your paths.")
+elif st.session_state.idx >= len(common):
+    st.success("Finished all images!")
+    if st.button("Reset"): st.session_state.idx = 0
+else:
     fname = common[st.session_state.idx]
-    st.subheader(f"Comparing: {fname} ({st.session_state.idx + 1} of {len(common)})")
-
+    st.write(f"**Current Image:** {fname} ({st.session_state.idx+1}/{len(common)})")
+    
     col1, col2 = st.columns(2)
-    for i, base in enumerate([path_a, path_b]):
-        img_path = os.path.join(base, fname)
-        with Image.open(img_path) as img:
-            # Compression for Web UI
+    for i, p in enumerate([path_a, path_b]):
+        with Image.open(os.path.join(p, fname)) as img:
             buf = BytesIO()
-            img.convert("RGB").save(buf, format="JPEG", quality=quality)
+            img.convert("RGB").save(buf, format="JPEG", quality=comp_level)
             (col1 if i==0 else col2).image(buf, use_container_width=True)
 
-    st.divider()
-    btn1, btn2 = st.columns(2)
-    btn1.button("🗑️ Move to Unused", on_click=process_files, args=("move", fname), use_container_width=True)
-    btn2.button("⭐ Keep Both", on_click=process_files, args=("keep", fname), use_container_width=True)
-else:
-    st.success("Comparison complete! No more matching files found.")
+    c1, c2 = st.columns(2)
+    c1.button("❌ Move to Unused", on_click=handle_click, args=("move",), use_container_width=True)
+    c2.button("✅ Keep Both", on_click=handle_click, args=("keep",), use_container_width=True)
