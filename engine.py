@@ -11,27 +11,40 @@ class SorterEngine:
 
     @staticmethod
     def init_db():
-        """Initializes the SQLite database and creates all required tables."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        
-        # Table for Profiles: Stores paths for Discovery, Review, and Output
+        # Profiles now store independent paths for each functional area
         cursor.execute('''CREATE TABLE IF NOT EXISTS profiles 
-            (name TEXT PRIMARY KEY, disc_t TEXT, rev_t TEXT, rev_c TEXT, path_out TEXT, mode TEXT)''')
+            (name TEXT PRIMARY KEY, 
+             tab1_target TEXT, 
+             tab2_target TEXT, tab2_control TEXT, 
+             tab4_source TEXT, tab4_out TEXT)''')
         
-        # Table for Folder IDs: Maps source folder paths to persistent numeric IDs
         cursor.execute('''CREATE TABLE IF NOT EXISTS folder_ids (path TEXT PRIMARY KEY, folder_id INTEGER)''')
-        
-        # Table for Categories: Stores sorting subfolder names for Tab 4
         cursor.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY)''')
-        
-        # Seed default categories if the table is empty
-        cursor.execute("SELECT COUNT(*) FROM categories")
-        if cursor.fetchone()[0] == 0:
-            defaults = ["_TRASH", "Default", "Action", "Solo"]
-            for cat in defaults:
-                cursor.execute("INSERT INTO categories VALUES (?)", (cat,))
-        
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def save_tab_paths(profile_name, t1_t=None, t2_t=None, t2_c=None, t4_s=None, t4_o=None):
+        """Updates only the paths provided, preserving others in the profile."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        # Fetch existing to avoid overwriting with None
+        cursor.execute("SELECT * FROM profiles WHERE name = ?", (profile_name,))
+        row = cursor.fetchone()
+        if not row:
+            row = (profile_name, "", "", "", "", "")
+            
+        new_values = (
+            profile_name,
+            t1_t if t1_t is not None else row[1],
+            t2_t if t2_t is not None else row[2],
+            t2_c if t2_c is not None else row[3],
+            t4_s if t4_s is not None else row[4],
+            t4_o if t4_o is not None else row[5]
+        )
+        cursor.execute("INSERT OR REPLACE INTO profiles VALUES (?, ?, ?, ?, ?, ?)", new_values)
         conn.commit()
         conn.close()
 
