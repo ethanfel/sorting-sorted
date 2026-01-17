@@ -37,9 +37,9 @@ def render(path_t, path_c, quality, threshold, id_prefix):
                 st.session_state.idx_time += 1
                 st.rerun()
         else:
-            st.warning("No time matches found within threshold.")
+            st.warning("No time matches found.")
             if st.button("SKIP"):
                 st.session_state.idx_time += 1
                 st.rerun()
     else:
-        st.success("All unmatched images in target folder have been reviewed.")
+        st.success("All unmatched images reviewed.")
