@@ -70,12 +70,27 @@ class SorterEngine:
         return t_dst, c_dst
 
     @staticmethod
-    def move_to_unused_synced(t_p, c_p, t_root, c_root):
-        """Moves both to 'unused' subfolders with synced names."""
+    def harmonize_names(t_p, c_p):
+        """Renames the control file to match the target filename exactly."""
         t_name = os.path.basename(t_p)
-        t_un, c_un = os.path.join(t_root, "unused", t_name), os.path.join(c_root, "unused", t_name)
+        c_dir = os.path.dirname(c_p)
+        new_c_p = os.path.join(c_dir, t_name)
+        
+        if c_p != new_c_p:
+            os.rename(c_p, new_c_p)
+            return new_c_p
+        return c_p
+
+    @staticmethod
+    def move_to_unused_synced(t_p, c_p, t_root, c_root):
+        """Moves both to 'unused' subfolders and ensures names match."""
+        t_name = os.path.basename(t_p)
+        t_un = os.path.join(t_root, "unused", t_name)
+        c_un = os.path.join(c_root, "unused", t_name) # Forced harmonization
+        
         os.makedirs(os.path.dirname(t_un), exist_ok=True)
         os.makedirs(os.path.dirname(c_un), exist_ok=True)
+        
         shutil.move(t_p, t_un)
         shutil.move(c_p, c_un)
         return t_un, c_un
