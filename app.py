@@ -3,8 +3,9 @@ import os
 from engine import SorterEngine
 import tab_time_discovery
 import tab_id_review
+import tab_unused_review # Import the new tab
 
-st.set_page_config(layout="wide", page_title="Turbo Sorter Pro v9.0")
+st.set_page_config(layout="wide", page_title="Turbo Sorter Pro v9.5")
 
 if 'history' not in st.session_state: st.session_state.history = []
 if 'idx_time' not in st.session_state: st.session_state.idx_time = 0
@@ -46,6 +47,14 @@ with st.sidebar:
     prefix = f"id{int(id_val):03d}_"
 
 # --- Tabs ---
-t1, t2 = st.tabs(["🕒 1. Time Discovery", "🆔 2. ID Match Review"])
-with t1: tab_time_discovery.render(path_t, quality, 50, prefix)
-with t2: tab_id_review.render(path_rv_t, path_rv_c, quality, prefix)
+t1, t2, t3 = st.tabs(["🕒 1. Time Discovery", "🆔 2. ID Match Review", "♻️ 3. Compare Unused"])
+
+with t1:
+    tab_time_discovery.render(path_t, quality, 50, prefix)
+
+with t2:
+    tab_id_review.render(path_rv_t, path_rv_c, quality, prefix)
+
+with t3:
+    # This tab lets you pull files back FROM unused folders TO selected folders
+    tab_unused_review.render(path_rv_t, path_rv_c, quality)
