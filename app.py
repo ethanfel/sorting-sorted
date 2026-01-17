@@ -8,8 +8,13 @@ SorterEngine.init_db()
 
 st.set_page_config(layout="wide", page_title="Turbo Sorter Pro DB")
 
+# --- GLOBAL SESSION INITIALIZATION ---
+# All indexes must be initialized here to avoid AttributeErrors
 if 'history' not in st.session_state: st.session_state.history = []
-if 'idx_cat' not in st.session_state: st.session_state.idx_cat = 0
+if 'idx_time' not in st.session_state: st.session_state.idx_time = 0      # Fix for Tab 1
+if 'idx_id' not in st.session_state: st.session_state.idx_id = 0          # Fix for Tab 2
+if 'idx_unused' not in st.session_state: st.session_state.idx_unused = 0  # Fix for Tab 3
+if 'idx_cat' not in st.session_state: st.session_state.idx_cat = 0        # Fix for Tab 4
 
 # --- Sidebar ---
 profiles = SorterEngine.load_profiles()
@@ -25,8 +30,15 @@ path_rv_t = st.sidebar.text_input("Review Target", value=p_data.get("rev_t", os.
 path_rv_c = st.sidebar.text_input("Review Control", value=p_data.get("rev_c", os.path.join(path_t, "selected_control")))
 
 if st.sidebar.button("💾 Save Profile"):
-    prof_name = st.sidebar.text_input("New Name")
-    if prof_name: SorterEngine.save_profile(prof_name, path_t, path_rv_t, path_rv_c, path_out, naming_mode)
+    prof_name = st.sidebar.text_input("Profile Name", key="save_prof_input")
+    if prof_name: 
+        SorterEngine.save_profile(prof_name, path_t, path_rv_t, path_rv_c, path_out, naming_mode)
+        st.sidebar.success(f"Profile {prof_name} Saved!")
+        st.rerun()
+
+if st.sidebar.button("↶ UNDO", use_container_width=True, disabled=not st.session_state.history):
+    SorterEngine.revert_action(st.session_state.history.pop())
+    st.rerun()
 
 # --- Tabs ---
 t1, t2, t3, t4 = st.tabs(["🕒 1. Discovery", "🆔 2. ID Review", "♻️ 3. Unused", "📂 4. Category Sorter"])
