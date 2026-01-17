@@ -61,15 +61,16 @@ class SorterEngine:
         return t_dst, c_dst
 
     @staticmethod
-    def save_favorite(name, path_t, path_c):
-        favs = SorterEngine.load_favorites()
-        favs[name] = {"target": path_t, "control": path_c}
-        with open(SorterEngine.CONFIG_PATH, 'w') as f:
-            json.dump(favs, f)
+    def revert_action(action):
+        if action['type'] in ['link_standard', 'link_solo']:
+            if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
+            if os.path.exists(action['c_dst']): os.remove(action['c_dst'])
+        elif action['type'] == 'unused':
+            if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
+            if os.path.exists(action['c_dst']): shutil.move(action['c_dst'], action['c_src'])
 
     @staticmethod
     def load_favorites():
         if os.path.exists(SorterEngine.CONFIG_PATH):
-            with open(SorterEngine.CONFIG_PATH, 'r') as f:
-                return json.load(f)
+            with open(SorterEngine.CONFIG_PATH, 'r') as f: return json.load(f)
         return {}
