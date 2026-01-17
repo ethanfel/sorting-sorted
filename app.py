@@ -1,96 +1,114 @@
 import streamlit as st
 import os, shutil
-from PIL import Image
-from io import BytesIO
+from engine import SorterEngine
 
-st.set_page_config(layout="wide", page_title="Deep Folder Sorter")
+st.set_page_config(layout="wide", page_title="Advanced Image Sorter Web")
 
+# --- Session State Initialization ---
+if 'idx_id' not in st.session_state: st.session_state.idx_id = 0
+if 'idx_time' not in st.session_state: st.session_state.idx_time = 0
+if 'history' not in st.session_state: st.session_state.history = []
+
+# --- Sidebar Configuration ---
+st.sidebar.title("🛠️ Global Settings")
 BASE_PATH = "/storage"
 
-# --- Advanced Folder Discovery ---
-@st.cache_data(ttl=60) # Cache for 1 minute so it doesn't lag
-def get_all_subfolders(base):
-    folder_list = []
+def get_dirs(p):
     try:
-        for root, dirs, files in os.walk(base):
-            # Optimization: Skip hidden folders or 'unused' folders
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'unused']
-            for name in dirs:
-                full_path = os.path.join(root, name)
-                # We store the path relative to BASE_PATH for a cleaner UI
-                folder_list.append(os.path.relpath(full_path, base))
-    except Exception as e:
-        st.error(f"Error scanning storage: {e}")
-    return sorted(folder_list)
+        return sorted([d for d in os.listdir(p) if os.path.isdir(os.path.join(p, d))])
+    except: return []
 
-st.sidebar.title("📁 Image Sorter Settings")
+dirs = get_dirs(BASE_PATH)
+target_sub = st.sidebar.selectbox("Target Folder (Folder 1)", dirs)
+control_sub = st.sidebar.selectbox("Control Folder (Folder 2)", dirs)
+quality = st.sidebar.slider("Compression Quality", 5, 100, 40)
+threshold = st.sidebar.number_input("Time Match Threshold (s)", value=50)
 
-# Get the list of all subfolders recursively
-all_folders = get_all_subfolders(BASE_PATH)
+path_t = os.path.join(BASE_PATH, target_sub) if target_sub else ""
+path_c = os.path.join(BASE_PATH, control_sub) if control_sub else ""
 
-# Search/Filter functionality
-search_query = st.sidebar.text_input("Search folders...", "")
-filtered_folders = [f for f in all_folders if search_query.lower() in f.lower()] if search_query else all_folders
+# ID Management
+auto_id = SorterEngine.get_max_id_number(path_t) + 1
+next_id_val = st.sidebar.number_input("Next ID Number", value=auto_id)
+id_prefix = f"id{next_id_val:03d}_"
 
-folder_a_rel = st.sidebar.selectbox("Select Folder 1", filtered_folders, key="f1")
-folder_b_rel = st.sidebar.selectbox("Select Folder 2", filtered_folders, key="f2")
+# Undo Button
+st.sidebar.divider()
+if st.sidebar.button("↶ UNDO LAST ACTION", use_container_width=True, disabled=not st.session_state.history):
+    last = st.session_state.history.pop()
+    SorterEngine.revert_action(last)
+    st.sidebar.success("Last action reverted.")
+    st.rerun()
 
-# Reconstruct absolute paths for the OS logic
-path_a = os.path.join(BASE_PATH, folder_a_rel) if folder_a_rel else ""
-path_b = os.path.join(BASE_PATH, folder_b_rel) if folder_b_rel else ""
+tab1, tab2 = st.tabs(["🆔 Tab 1: ID Match Review", "🕒 Tab 2: Time Discovery & Rename"])
 
-comp_level = st.sidebar.slider("Compression (Quality)", 5, 100, 40)
+# --- TAB 1: ID MATCH REVIEW ---
+with tab1:
+    map_t = SorterEngine.get_id_mapping(path_t)
+    map_c = SorterEngine.get_id_mapping(path_c)
+    common_ids = sorted(list(set(map_t.keys()) & set(map_c.keys())))
 
-# --- ID Matching Logic (unchanged from prefix logic) ---
-def get_map(p):
-    m = {}
-    if p and os.path.exists(p):
-        for f in os.listdir(p):
-            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
-                prefix = f.split('_')[0]
-                m[prefix] = f
-    return m
+    if st.session_state.idx_id < len(common_ids):
+        curr_id = common_ids[st.session_state.idx_id]
+        t_f, c_f = map_t[curr_id], map_c[curr_id]
+        t_p, c_p = os.path.join(path_t, t_f), os.path.join(path_c, c_f)
 
-map_a = get_map(path_a)
-map_b = get_map(path_b)
-common_ids = sorted(list(set(map_a.keys()) & set(map_b.keys())))
+        st.subheader(f"Reviewing Match: {curr_id} ({st.session_state.idx_id + 1}/{len(common_ids)})")
+        col1, col2 = st.columns(2)
+        col1.image(SorterEngine.compress_for_web(t_p, quality), caption=f"Target: {t_f}")
+        col2.image(SorterEngine.compress_for_web(c_p, quality), caption=f"Control: {c_f}")
 
-if 'idx' not in st.session_state: 
-    st.session_state.idx = 0
+        if st.button("❌ Move Pair to Unused", use_container_width=True, type="primary"):
+            t_un = os.path.join(path_t, "unused", t_f)
+            c_un = os.path.join(path_c, "unused", c_f)
+            os.makedirs(os.path.dirname(t_un), exist_ok=True)
+            os.makedirs(os.path.dirname(c_un), exist_ok=True)
+            shutil.move(t_p, t_un)
+            shutil.move(c_p, c_un)
+            st.session_state.history.append({'type': 'unused', 't_src': t_p, 't_dst': t_un, 'c_src': c_p, 'c_dst': c_un})
+            st.rerun()
+    else:
+        st.info("No more ID matches found.")
 
-# --- UI Display ---
-if not common_ids:
-    st.info("Select two folders to find matching prefixes (e.g., id001_...)")
-elif st.session_state.idx < len(common_ids):
-    curr_id = common_ids[st.session_state.idx]
-    
-    st.write(f"### ID: `{curr_id}`")
-    st.caption(f"Progress: {st.session_state.idx + 1} / {len(common_ids)}")
+# --- TAB 2: TIME DISCOVERY ---
+with tab2:
+    target_imgs = SorterEngine.get_images(path_t)
+    unmatched_t = [f for f in target_imgs if not f.startswith("id")]
 
-    col1, col2 = st.columns(2)
-    for i, (p, m) in enumerate([(path_a, map_a), (path_b, map_b)]):
-        img_p = os.path.join(p, m[curr_id])
-        with Image.open(img_p) as img:
-            buf = BytesIO()
-            img.convert("RGB").save(buf, format="JPEG", quality=comp_level)
-            (col1 if i==0 else col2).image(buf, use_container_width=True, caption=m[curr_id])
-
-    st.divider()
-    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
-    
-    if btn_col1.button("❌ Move ID to Unused", use_container_width=True, type="primary"):
-        for p, m in [(path_a, map_a), (path_b, map_b)]:
-            dest = os.path.join(p, "unused")
-            os.makedirs(dest, exist_ok=True)
-            shutil.move(os.path.join(p, m[curr_id]), os.path.join(dest, m[curr_id]))
-        st.session_state.idx += 1
-        st.rerun()
-
-    if btn_col3.button("✅ Keep Both", use_container_width=True):
-        st.session_state.idx += 1
-        st.rerun()
-else:
-    st.success("All items processed!")
-    if st.button("Start Over"):
-        st.session_state.idx = 0
-        st.rerun()
+    if st.session_state.idx_time < len(unmatched_t):
+        t_file = unmatched_t[st.session_state.idx_time]
+        t_path = os.path.join(path_t, t_file)
+        t_time = os.path.getmtime(t_path)
+        
+        best_c_path, min_delta = None, threshold
+        for c_file in SorterEngine.get_images(path_c):
+            c_path = os.path.join(path_c, c_file)
+            delta = abs(t_time - os.path.getmtime(c_path))
+            if delta < min_delta:
+                min_delta, best_c_path = delta, c_path
+        
+        if best_c_path:
+            st.subheader(f"Suggested Match (Δ {min_delta:.1f}s)")
+            col1, col2 = st.columns(2)
+            col1.image(SorterEngine.compress_for_web(t_path, quality), caption=t_file)
+            col2.image(SorterEngine.compress_for_web(best_c_path, quality), caption=os.path.basename(best_c_path))
+            
+            b1, b2, b3 = st.columns(3)
+            if b1.button("MATCH (Standard)", type="primary", use_container_width=True):
+                t_dst, c_dst = SorterEngine.execute_move(t_path, best_c_path, path_t, path_c, id_prefix, "standard")
+                st.session_state.history.append({'type': 'link_standard', 't_src': t_path, 't_dst': t_dst, 'c_src': best_c_path, 'c_dst': c_dst})
+                st.rerun()
+            if b2.button("SOLO (Woman)", use_container_width=True):
+                t_dst, c_dst = SorterEngine.execute_move(t_path, best_c_path, path_t, path_c, id_prefix, "solo")
+                st.session_state.history.append({'type': 'link_solo', 't_src': t_path, 't_dst': t_dst, 'c_src': best_c_path, 'c_dst': c_dst})
+                st.rerun()
+            if b3.button("SKIP", use_container_width=True):
+                st.session_state.idx_time += 1
+                st.rerun()
+        else:
+            st.warning(f"No file found within {threshold}s for {t_file}")
+            if st.button("SKIP NEXT"):
+                st.session_state.idx_time += 1
+                st.rerun()
+    else:
+        st.success("All unmatched files reviewed.")
