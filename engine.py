@@ -9,21 +9,11 @@ class SorterEngine:
 
     @staticmethod
     def get_images(path):
+        """Returns list of image files in a directory."""
         exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
         if not path or not os.path.exists(path): return []
         try:
             return sorted([f for f in os.listdir(path) if f.lower().endswith(exts)])
-        except: return []
-
-    @staticmethod
-    def get_sibling_controls(target_path):
-        """Finds all folders at the same level as the target."""
-        parent = os.path.dirname(target_path)
-        if not parent: return []
-        try:
-            return [os.path.join(parent, d) for d in os.listdir(parent) 
-                    if os.path.isdir(os.path.join(parent, d)) and 
-                    os.path.abspath(os.path.join(parent, d)) != os.path.abspath(target_path)]
         except: return []
 
     @staticmethod
@@ -35,6 +25,17 @@ class SorterEngine:
                 prefix = f.split('_')[0]
                 mapping[prefix] = f
         return mapping
+
+    @staticmethod
+    def get_sibling_controls(target_path):
+        """Finds all folders at the same level as the target."""
+        parent = os.path.dirname(target_path)
+        if not parent: return []
+        try:
+            return [os.path.join(parent, d) for d in os.listdir(parent) 
+                    if os.path.isdir(os.path.join(parent, d)) and 
+                    os.path.abspath(os.path.join(parent, d)) != os.path.abspath(target_path)]
+        except: return []
 
     @staticmethod
     def get_max_id_number(target_path):
@@ -56,63 +57,39 @@ class SorterEngine:
         """Moves target and copies control, syncing the filenames."""
         target_base = os.path.basename(t_path)
         new_name = f"{prefix}{target_base}"
-        
         folders = {
             "standard": ("selected_target", "selected_control"),
             "solo": ("selected_target_solo_woman", "control_selected_solo_woman")
         }
-        
         t_sub, c_sub = folders[mode]
-        t_dst = os.path.join(target_root, t_sub, new_name)
-        c_dst = os.path.join(target_root, c_sub, new_name)
-        
+        t_dst, c_dst = os.path.join(target_root, t_sub, new_name), os.path.join(target_root, c_sub, new_name)
         os.makedirs(os.path.dirname(t_dst), exist_ok=True)
         os.makedirs(os.path.dirname(c_dst), exist_ok=True)
-        
         shutil.move(t_path, t_dst)
         shutil.copy2(c_path, c_dst)
         return t_dst, c_dst
 
     @staticmethod
-    def move_to_unused_synced(t_p, c_p, t_root, c_folder):
+    def move_to_unused_synced(t_p, c_p, t_root, c_root):
         """Moves both to 'unused' subfolders with synced names."""
         t_name = os.path.basename(t_p)
-        t_un = os.path.join(t_root, "unused", t_name)
-        c_un = os.path.join(c_folder, "unused", t_name)
-        
+        t_un, c_un = os.path.join(t_root, "unused", t_name), os.path.join(c_root, "unused", t_name)
         os.makedirs(os.path.dirname(t_un), exist_ok=True)
         os.makedirs(os.path.dirname(c_un), exist_ok=True)
-        
         shutil.move(t_p, t_un)
         shutil.move(c_p, c_un)
         return t_un, c_un
 
     @staticmethod
-    def compress_for_web(path, quality):
-        try:
-            with Image.open(path) as img:
-                buf = BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=quality)
-                return buf
-        except: return None
-
-    @staticmethod
-    def revert_action(action):
-        """Undoes the last file operation."""
-        if action['type'] in ['link_standard', 'link_solo', 'unused']:
-            if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
-            if 'c_dst' in action and os.path.exists(action['c_dst']):
-                if 'link' in action['type']: os.remove(action['c_dst'])
-                else: shutil.move(action['c_dst'], action['c_src'])
-
-    @staticmethod
-    def save_favorite(name, path_t, path_c):
+    def save_favorite(name, disc_t, rev_t, rev_c):
+        """Saves expanded path profile to JSON."""
         favs = SorterEngine.load_favorites()
-        favs[name] = {"target": path_t, "control": path_c}
+        favs[name] = {"disc_t": disc_t, "rev_t": rev_t, "rev_c": rev_c}
         with open(SorterEngine.CONFIG_PATH, 'w') as f: json.dump(favs, f, indent=4)
 
     @staticmethod
     def delete_favorite(name):
+        """Deletes a profile from JSON."""
         favs = SorterEngine.load_favorites()
         if name in favs:
             del favs[name]
@@ -125,3 +102,20 @@ class SorterEngine:
                 with open(SorterEngine.CONFIG_PATH, 'r') as f: return json.load(f)
             except: return {}
         return {}
+
+    @staticmethod
+    def compress_for_web(path, quality):
+        try:
+            with Image.open(path) as img:
+                buf = BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=quality)
+                return buf
+        except: return None
+
+    @staticmethod
+    def revert_action(action):
+        if action['type'] in ['link_standard', 'link_solo', 'unused', 'move']:
+            if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
+            if 'c_dst' in action and os.path.exists(action['c_dst']):
+                if 'link' in action['type']: os.remove(action['c_dst'])
+                else: shutil.move(action['c_dst'], action['c_src'])
