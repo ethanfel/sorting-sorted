@@ -1,60 +1,37 @@
 import streamlit as st
 import os
 from engine import SorterEngine
-import tab_time_discovery
-import tab_id_review
-import tab_unused_review # Import the new tab
+import tab_time_discovery, tab_id_review, tab_unused_review, tab_category_sorter
 
-st.set_page_config(layout="wide", page_title="Turbo Sorter Pro v9.5")
+# Start Database
+SorterEngine.init_db()
+
+st.set_page_config(layout="wide", page_title="Turbo Sorter Pro DB")
 
 if 'history' not in st.session_state: st.session_state.history = []
-if 'idx_time' not in st.session_state: st.session_state.idx_time = 0
-if 'idx_id' not in st.session_state: st.session_state.idx_id = 0
+if 'idx_cat' not in st.session_state: st.session_state.idx_cat = 0
 
 # --- Sidebar ---
-BASE_PATH = "/storage"
-favs = SorterEngine.load_favorites()
+profiles = SorterEngine.load_profiles()
+selected = st.sidebar.selectbox("⭐ Profiles", ["None"] + list(profiles.keys()))
+p_data = profiles.get(selected, {})
 
-with st.sidebar:
-    st.title("⭐ Profiles")
-    selected_fav = st.selectbox("Load Profile", ["None"] + list(favs.keys()))
-    
-    st.divider()
-    st.title("📁 Paths")
-    f_data = favs.get(selected_fav, {})
-    path_t = st.text_input("Discovery Target", value=f_data.get("disc_t", BASE_PATH))
-    path_rv_t = st.text_input("Review Target", value=f_data.get("rev_t", os.path.join(path_t, "selected_target")))
-    path_rv_c = st.text_input("Review Control", value=f_data.get("rev_c", os.path.join(path_t, "selected_control")))
+path_t = st.sidebar.text_input("Discovery/Category Target", value=p_data.get("disc_t", "/storage"))
+path_out = st.sidebar.text_input("Category Output", value=p_data.get("path_out", "/storage"))
+naming_mode = st.sidebar.radio("Naming Mode", ["id", "original"], index=0 if p_data.get("mode") == "id" else 1)
 
-    # Collision Scanner
-    m_t = SorterEngine.get_id_mapping(path_rv_t)
-    m_c = SorterEngine.get_id_mapping(path_rv_c)
-    common_ids = sorted(list(set(m_t.keys()) & set(m_c.keys())))
-    
-    collisions = [pid for pid in (set(m_t.keys()) | set(m_c.keys())) if len(m_t.get(pid, [])) > 1 or len(m_c.get(pid, [])) > 1]
-    
-    if collisions:
-        st.error(f"⚠️ {len(collisions)} ID Collisions!")
-        for cid in collisions:
-            if st.button(f"Fix {cid}", key=f"btn_{cid}"):
-                if cid in common_ids:
-                    st.session_state.idx_id = common_ids.index(cid)
-                    st.rerun()
+# Review Paths
+path_rv_t = st.sidebar.text_input("Review Target", value=p_data.get("rev_t", os.path.join(path_t, "selected_target")))
+path_rv_c = st.sidebar.text_input("Review Control", value=p_data.get("rev_c", os.path.join(path_t, "selected_control")))
 
-    st.divider()
-    quality = st.slider("Quality", 5, 100, 40)
-    id_val = st.number_input("Next ID", value=SorterEngine.get_max_id_number(path_t) + 1)
-    prefix = f"id{int(id_val):03d}_"
+if st.sidebar.button("💾 Save Profile"):
+    prof_name = st.sidebar.text_input("New Name")
+    if prof_name: SorterEngine.save_profile(prof_name, path_t, path_rv_t, path_rv_c, path_out, naming_mode)
 
 # --- Tabs ---
-t1, t2, t3 = st.tabs(["🕒 1. Time Discovery", "🆔 2. ID Match Review", "♻️ 3. Compare Unused"])
+t1, t2, t3, t4 = st.tabs(["🕒 1. Discovery", "🆔 2. ID Review", "♻️ 3. Unused", "📂 4. Category Sorter"])
 
-with t1:
-    tab_time_discovery.render(path_t, quality, 50, prefix)
-
-with t2:
-    tab_id_review.render(path_rv_t, path_rv_c, quality, prefix)
-
-with t3:
-    # This tab lets you pull files back FROM unused folders TO selected folders
-    tab_unused_review.render(path_rv_t, path_rv_c, quality)
+with t1: tab_time_discovery.render(path_t, 40, 50, "id001_")
+with t2: tab_id_review.render(path_rv_t, path_rv_c, 40)
+with t3: tab_unused_review.render(path_rv_t, path_rv_c, 40)
+with t4: tab_category_sorter.render(path_t, path_out, 40, naming_mode)
