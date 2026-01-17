@@ -17,7 +17,7 @@ class SorterEngine:
 
     @staticmethod
     def get_sibling_controls(target_path):
-        """Scans for all folders at the same level as the target."""
+        """Finds all folders at the same level as the target."""
         parent = os.path.dirname(target_path)
         if not parent: return []
         try:
@@ -27,8 +27,18 @@ class SorterEngine:
         except: return []
 
     @staticmethod
+    def get_id_mapping(path):
+        """Maps idXXX prefixes to filenames."""
+        mapping = {}
+        for f in SorterEngine.get_images(path):
+            if f.startswith("id") and "_" in f:
+                prefix = f.split('_')[0]
+                mapping[prefix] = f
+        return mapping
+
+    @staticmethod
     def get_max_id_number(target_path):
-        """Finds highest ID in target and its expected subfolders."""
+        """Scans for highest existing ID to prevent overwriting."""
         max_id = 0
         search_paths = [target_path, os.path.join(target_path, "selected_target")]
         for p in search_paths:
@@ -43,14 +53,10 @@ class SorterEngine:
 
     @staticmethod
     def execute_match(t_path, c_path, target_root, prefix, mode="standard"):
-        """
-        Moves files to subfolders inside the target folder.
-        Renames control to match target filename.
-        """
+        """Moves target and copies control, syncing the filenames."""
         target_base = os.path.basename(t_path)
         new_name = f"{prefix}{target_base}"
         
-        # Folder mapping from original script
         folders = {
             "standard": ("selected_target", "selected_control"),
             "solo": ("selected_target_solo_woman", "control_selected_solo_woman")
@@ -66,30 +72,56 @@ class SorterEngine:
         shutil.move(t_path, t_dst)
         shutil.copy2(c_path, c_dst)
         return t_dst, c_dst
-    
-    # ... [revert_action, compress_for_web, load/save_favorites as previously defined] ...
+
+    @staticmethod
+    def move_to_unused_synced(t_p, c_p, t_root, c_folder):
+        """Moves both to 'unused' subfolders with synced names."""
+        t_name = os.path.basename(t_p)
+        t_un = os.path.join(t_root, "unused", t_name)
+        c_un = os.path.join(c_folder, "unused", t_name)
+        
+        os.makedirs(os.path.dirname(t_un), exist_ok=True)
+        os.makedirs(os.path.dirname(c_un), exist_ok=True)
+        
+        shutil.move(t_p, t_un)
+        shutil.move(c_p, c_un)
+        return t_un, c_un
+
+    @staticmethod
+    def compress_for_web(path, quality):
+        try:
+            with Image.open(path) as img:
+                buf = BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=quality)
+                return buf
+        except: return None
 
     @staticmethod
     def revert_action(action):
-        """Reverses the last filesystem action."""
-        if action['type'] in ['link_standard', 'link_solo']:
+        """Undoes the last file operation."""
+        if action['type'] in ['link_standard', 'link_solo', 'unused']:
             if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
-            if os.path.exists(action['c_dst']): os.remove(action['c_dst'])
-        elif action['type'] == 'unused':
-            if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
-            if os.path.exists(action['c_dst']): shutil.move(action['c_dst'], action['c_src'])
+            if 'c_dst' in action and os.path.exists(action['c_dst']):
+                if 'link' in action['type']: os.remove(action['c_dst'])
+                else: shutil.move(action['c_dst'], action['c_src'])
 
     @staticmethod
     def save_favorite(name, path_t, path_c):
-        """Saves a path pair to the JSON config."""
         favs = SorterEngine.load_favorites()
         favs[name] = {"target": path_t, "control": path_c}
-        with open(SorterEngine.CONFIG_PATH, 'w') as f:
-            json.dump(favs, f)
+        with open(SorterEngine.CONFIG_PATH, 'w') as f: json.dump(favs, f, indent=4)
+
+    @staticmethod
+    def delete_favorite(name):
+        favs = SorterEngine.load_favorites()
+        if name in favs:
+            del favs[name]
+            with open(SorterEngine.CONFIG_PATH, 'w') as f: json.dump(favs, f, indent=4)
 
     @staticmethod
     def load_favorites():
-        """Loads path pairs from the JSON config."""
         if os.path.exists(SorterEngine.CONFIG_PATH):
-            with open(SorterEngine.CONFIG_PATH, 'r') as f: return json.load(f)
+            try:
+                with open(SorterEngine.CONFIG_PATH, 'r') as f: return json.load(f)
+            except: return {}
         return {}
