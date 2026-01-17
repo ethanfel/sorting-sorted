@@ -1,55 +1,53 @@
 import streamlit as st
-import os, shutil
+import os
 from engine import SorterEngine
 
-def render(path_rv_t, path_rv_c, quality):
+def render(path_rv_t, path_rv_c, quality, next_prefix):
     map_t = SorterEngine.get_id_mapping(path_rv_t)
     map_c = SorterEngine.get_id_mapping(path_rv_c)
-    
     common_ids = sorted(list(set(map_t.keys()) & set(map_c.keys())))
     
     if st.session_state.idx_id < len(common_ids):
         curr_id = common_ids[st.session_state.idx_id]
-        t_p = os.path.join(path_rv_t, map_t[curr_id])
-        c_p = os.path.join(path_rv_c, map_c[curr_id])
+        t_files, c_files = map_t.get(curr_id, []), map_c.get(curr_id, [])
+
+        st.subheader(f"Reviewing ID: {curr_id}")
         
-        st.subheader(f"Reviewing ID: {curr_id} ({st.session_state.idx_id + 1}/{len(common_ids)})")
-        
-        # Displaying filenames to see the mismatch
-        st.text(f"Target Name: {os.path.basename(t_p)}")
-        st.text(f"Control Name: {os.path.basename(c_p)}")
+        # Selector for Collisions
+        t_idx = st.radio("Target File", range(len(t_files)), format_func=lambda x: t_files[x], horizontal=True) if len(t_files) > 1 else 0
+        c_idx = st.radio("Control File", range(len(c_files)), format_func=lambda x: c_files[x], horizontal=True) if len(c_files) > 1 else 0
+
+        t_p = os.path.join(path_rv_t, t_files[t_idx])
+        c_p = os.path.join(path_rv_c, c_files[c_idx])
 
         col1, col2 = st.columns(2)
-        img1 = SorterEngine.compress_for_web(t_p, quality)
-        img2 = SorterEngine.compress_for_web(c_p, quality)
+        col1.image(SorterEngine.compress_for_web(t_p, quality), caption=t_files[t_idx])
+        col2.image(SorterEngine.compress_for_web(c_p, quality), caption=c_files[c_idx])
         
-        if img1: col1.image(img1)
-        if img2: col2.image(img2)
-        
-        btn_col1, btn_col2 = st.columns(2)
-        
-        # Action 1: Move to Unused with harmonization
-        if btn_col1.button("❌ Move to Unused (Match Names)", use_container_width=True, type="primary"):
-            t_un, c_un = SorterEngine.move_to_unused_synced(t_p, c_p, path_rv_t, path_rv_c)
-            st.session_state.history.append({
-                'type': 'unused', 
-                't_src': t_p, 't_dst': t_un, 
-                'c_src': c_p, 'c_dst': c_un
-            })
+        # Action Grid
+        b1, b2, b3 = st.columns(3)
+        if b1.button("❌ Move Pair to Unused", use_container_width=True, type="primary"):
+            SorterEngine.move_to_unused_synced(t_p, c_p, path_rv_t, path_rv_c)
+            st.rerun()
+
+        if b2.button("✅ Keep & Harmonize", use_container_width=True):
+            SorterEngine.harmonize_names(t_p, c_p)
+            if len(t_files) <= 1 and len(c_files) <= 1:
+                st.session_state.idx_id += 1
+            st.rerun()
+
+        if b3.button("➡️ Next ID", use_container_width=True):
             st.session_state.idx_id += 1
             st.rerun()
 
-        # Action 2: Keep Both with harmonization
-        if btn_col2.button("✅ Keep Both & Harmonize Names", use_container_width=True):
-            # Ensure the control name matches target name before moving on
-            new_c_p = SorterEngine.harmonize_names(t_p, c_p)
-            if new_c_p != c_p:
-                st.toast(f"Renamed control to match target.")
-            
-            st.session_state.idx_id += 1
-            st.rerun()
+        # Re-ID Tool (for splitting collisions)
+        with st.expander("🛠️ Re-ID Tool"):
+            st.write("Assign a new ID to the selected pair to resolve a collision.")
+            if st.button(f"Assign to {next_prefix}"):
+                SorterEngine.re_id_file(t_p, next_prefix)
+                SorterEngine.re_id_file(c_p, next_prefix)
+                st.success(f"Moved to {next_prefix}")
+                st.rerun()
     else:
         st.info("Review complete.")
-        if st.button("Reset Review Progress"):
-            st.session_state.idx_id = 0
-            st.rerun()
+        if st.button("Reset"): st.session_state.idx_id = 0; st.rerun()
