@@ -3,6 +3,7 @@ import os
 from engine import SorterEngine
 
 def render(path_rv_t, path_rv_c, quality, next_prefix):
+    # Mapping IDs to lists to handle collisions
     map_t = SorterEngine.get_id_mapping(path_rv_t)
     map_c = SorterEngine.get_id_mapping(path_rv_c)
     common_ids = sorted(list(set(map_t.keys()) & set(map_c.keys())))
@@ -11,9 +12,9 @@ def render(path_rv_t, path_rv_c, quality, next_prefix):
         curr_id = common_ids[st.session_state.idx_id]
         t_files, c_files = map_t.get(curr_id, []), map_c.get(curr_id, [])
 
-        st.subheader(f"Reviewing ID: {curr_id}")
+        st.subheader(f"Reviewing ID: {curr_id} ({st.session_state.idx_id + 1}/{len(common_ids)})")
         
-        # Selector for Collisions
+        # Radio buttons allow selection between colliding files
         t_idx = st.radio("Target File", range(len(t_files)), format_func=lambda x: t_files[x], horizontal=True) if len(t_files) > 1 else 0
         c_idx = st.radio("Control File", range(len(c_files)), format_func=lambda x: c_files[x], horizontal=True) if len(c_files) > 1 else 0
 
@@ -21,10 +22,10 @@ def render(path_rv_t, path_rv_c, quality, next_prefix):
         c_p = os.path.join(path_rv_c, c_files[c_idx])
 
         col1, col2 = st.columns(2)
-        col1.image(SorterEngine.compress_for_web(t_p, quality), caption=t_files[t_idx])
-        col2.image(SorterEngine.compress_for_web(c_p, quality), caption=c_files[c_idx])
+        col1.image(SorterEngine.compress_for_web(t_p, quality), caption=f"Target: {t_files[t_idx]}")
+        col2.image(SorterEngine.compress_for_web(c_p, quality), caption=f"Control: {c_files[c_idx]}")
         
-        # Action Grid
+        # Actions
         b1, b2, b3 = st.columns(3)
         if b1.button("❌ Move Pair to Unused", use_container_width=True, type="primary"):
             SorterEngine.move_to_unused_synced(t_p, c_p, path_rv_t, path_rv_c)
@@ -40,14 +41,16 @@ def render(path_rv_t, path_rv_c, quality, next_prefix):
             st.session_state.idx_id += 1
             st.rerun()
 
-        # Re-ID Tool (for splitting collisions)
+        # Re-ID Tool for splitting collisions
         with st.expander("🛠️ Re-ID Tool"):
-            st.write("Assign a new ID to the selected pair to resolve a collision.")
+            st.write("Assign a new unique ID to this specific pair to resolve the collision.")
             if st.button(f"Assign to {next_prefix}"):
                 SorterEngine.re_id_file(t_p, next_prefix)
                 SorterEngine.re_id_file(c_p, next_prefix)
-                st.success(f"Moved to {next_prefix}")
+                st.success(f"Files reassigned to {next_prefix}")
                 st.rerun()
     else:
         st.info("Review complete.")
-        if st.button("Reset"): st.session_state.idx_id = 0; st.rerun()
+        if st.button("Reset Review Progress"): 
+            st.session_state.idx_id = 0
+            st.rerun()
