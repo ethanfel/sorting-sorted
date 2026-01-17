@@ -1,80 +1,96 @@
 import streamlit as st
-import os
-import shutil
+import os, shutil
 from PIL import Image
 from io import BytesIO
 
-st.set_page_config(layout="wide", page_title="ID-Based Image Sorter")
+st.set_page_config(layout="wide", page_title="Deep Folder Sorter")
 
 BASE_PATH = "/storage"
 
-# --- Sidebar ---
-st.sidebar.header("📁 Folder Selection")
-def get_subfolders(directory):
+# --- Advanced Folder Discovery ---
+@st.cache_data(ttl=60) # Cache for 1 minute so it doesn't lag
+def get_all_subfolders(base):
+    folder_list = []
     try:
-        return sorted([d for d in os.listdir(directory) if os.path.isdir(os.path.join(directory, d))])
-    except: return []
+        for root, dirs, files in os.walk(base):
+            # Optimization: Skip hidden folders or 'unused' folders
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'unused']
+            for name in dirs:
+                full_path = os.path.join(root, name)
+                # We store the path relative to BASE_PATH for a cleaner UI
+                folder_list.append(os.path.relpath(full_path, base))
+    except Exception as e:
+        st.error(f"Error scanning storage: {e}")
+    return sorted(folder_list)
 
-subfolders = get_subfolders(BASE_PATH)
-folder_a_name = st.sidebar.selectbox("Select Folder 1", subfolders)
-folder_b_name = st.sidebar.selectbox("Select Folder 2", subfolders)
+st.sidebar.title("📁 Image Sorter Settings")
+
+# Get the list of all subfolders recursively
+all_folders = get_all_subfolders(BASE_PATH)
+
+# Search/Filter functionality
+search_query = st.sidebar.text_input("Search folders...", "")
+filtered_folders = [f for f in all_folders if search_query.lower() in f.lower()] if search_query else all_folders
+
+folder_a_rel = st.sidebar.selectbox("Select Folder 1", filtered_folders, key="f1")
+folder_b_rel = st.sidebar.selectbox("Select Folder 2", filtered_folders, key="f2")
+
+# Reconstruct absolute paths for the OS logic
+path_a = os.path.join(BASE_PATH, folder_a_rel) if folder_a_rel else ""
+path_b = os.path.join(BASE_PATH, folder_b_rel) if folder_b_rel else ""
+
 comp_level = st.sidebar.slider("Compression (Quality)", 5, 100, 40)
 
-path_a = os.path.join(BASE_PATH, folder_a_name) if folder_a_name else ""
-path_b = os.path.join(BASE_PATH, folder_b_name) if folder_b_name else ""
+# --- ID Matching Logic (unchanged from prefix logic) ---
+def get_map(p):
+    m = {}
+    if p and os.path.exists(p):
+        for f in os.listdir(p):
+            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                prefix = f.split('_')[0]
+                m[prefix] = f
+    return m
 
-# --- ID Matching Logic ---
-def get_id_map(path):
-    mapping = {}
-    if not path or not os.path.exists(path): return mapping
-    for f in os.listdir(path):
-        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
-            # Extracts 'id001' from 'id001_example.jpg'
-            prefix = f.split('_')[0]
-            mapping[prefix] = f
-    return mapping
-
-map_a = get_id_map(path_a)
-map_b = get_id_map(path_b)
+map_a = get_map(path_a)
+map_b = get_map(path_b)
 common_ids = sorted(list(set(map_a.keys()) & set(map_b.keys())))
 
-if 'idx' not in st.session_state:
+if 'idx' not in st.session_state: 
     st.session_state.idx = 0
 
-def move_files(prefix):
-    for path, mapping in [(path_a, map_a), (path_b, map_b)]:
-        filename = mapping[prefix]
-        target_dir = os.path.join(path, "unused")
-        os.makedirs(target_dir, exist_ok=True)
-        shutil.move(os.path.join(path, filename), os.path.join(target_dir, filename))
-    st.session_state.idx += 1
-
-# --- Main UI ---
+# --- UI Display ---
 if not common_ids:
-    st.info("No matching IDs found (e.g., 'id001_') between these folders.")
-elif st.session_state.idx >= len(common_ids):
-    st.success("All matched IDs processed!")
-    if st.button("Reset"): st.session_state.idx = 0
-else:
-    current_id = common_ids[st.session_state.idx]
-    file_a = map_a[current_id]
-    file_b = map_b[current_id]
-
-    st.write(f"### Current ID: `{current_id}`")
+    st.info("Select two folders to find matching prefixes (e.g., id001_...)")
+elif st.session_state.idx < len(common_ids):
+    curr_id = common_ids[st.session_state.idx]
+    
+    st.write(f"### ID: `{curr_id}`")
     st.caption(f"Progress: {st.session_state.idx + 1} / {len(common_ids)}")
 
     col1, col2 = st.columns(2)
-    for i, (p, f) in enumerate([(path_a, file_a), (path_b, file_b)]):
-        with Image.open(os.path.join(p, f)) as img:
+    for i, (p, m) in enumerate([(path_a, map_a), (path_b, map_b)]):
+        img_p = os.path.join(p, m[curr_id])
+        with Image.open(img_p) as img:
             buf = BytesIO()
             img.convert("RGB").save(buf, format="JPEG", quality=comp_level)
-            (col1 if i==0 else col2).image(buf, use_container_width=True, caption=f)
+            (col1 if i==0 else col2).image(buf, use_container_width=True, caption=m[curr_id])
 
     st.divider()
-    c1, c2, c3 = st.columns([1, 1, 1])
-    if c1.button("❌ Move ID to Unused", use_container_width=True):
-        move_files(current_id)
-        st.rerun()
-    if c3.button("✅ Keep Both", use_container_width=True):
+    btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+    
+    if btn_col1.button("❌ Move ID to Unused", use_container_width=True, type="primary"):
+        for p, m in [(path_a, map_a), (path_b, map_b)]:
+            dest = os.path.join(p, "unused")
+            os.makedirs(dest, exist_ok=True)
+            shutil.move(os.path.join(p, m[curr_id]), os.path.join(dest, m[curr_id]))
         st.session_state.idx += 1
+        st.rerun()
+
+    if btn_col3.button("✅ Keep Both", use_container_width=True):
+        st.session_state.idx += 1
+        st.rerun()
+else:
+    st.success("All items processed!")
+    if st.button("Start Over"):
+        st.session_state.idx = 0
         st.rerun()
