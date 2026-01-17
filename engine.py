@@ -7,28 +7,58 @@ from io import BytesIO
 class SorterEngine:
     CONFIG_PATH = "/app/favorites.json"
 
-    # ... [get_images, get_id_mapping, get_max_id_number, compress_for_web remain the same] ...
+    @staticmethod
+    def get_images(path):
+        exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
+        if not path or not os.path.exists(path): return []
+        try:
+            return sorted([f for f in os.listdir(path) if f.lower().endswith(exts)])
+        except: return []
 
     @staticmethod
-    def execute_move(t_path, c_path, t_folder, c_folder, prefix, mode="standard"):
+    def get_sibling_controls(target_path):
+        """Scans for all folders at the same level as the target."""
+        parent = os.path.dirname(target_path)
+        if not parent: return []
+        try:
+            return [os.path.join(parent, d) for d in os.listdir(parent) 
+                    if os.path.isdir(os.path.join(parent, d)) and 
+                    os.path.abspath(os.path.join(parent, d)) != os.path.abspath(target_path)]
+        except: return []
+
+    @staticmethod
+    def get_max_id_number(target_path):
+        """Finds highest ID in target and its expected subfolders."""
+        max_id = 0
+        search_paths = [target_path, os.path.join(target_path, "selected_target")]
+        for p in search_paths:
+            if not os.path.exists(p): continue
+            for f in os.listdir(p):
+                if f.startswith("id") and "_" in f:
+                    try:
+                        num = int(f[2:].split('_')[0])
+                        if num > max_id: max_id = num
+                    except: continue
+        return max_id
+
+    @staticmethod
+    def execute_match(t_path, c_path, target_root, prefix, mode="standard"):
         """
-        Moves target and copies control. 
-        Renames control to match target's name exactly.
+        Moves files to subfolders inside the target folder.
+        Renames control to match target filename.
         """
-        # We use the target's filename as the base for BOTH
-        target_base_name = os.path.basename(t_path)
+        target_base = os.path.basename(t_path)
+        new_name = f"{prefix}{target_base}"
         
-        t_fname = f"{prefix}{target_base_name}"
-        c_fname = f"{prefix}{target_base_name}" # Now identical to target name
-        
-        subdirs = {
+        # Folder mapping from original script
+        folders = {
             "standard": ("selected_target", "selected_control"),
             "solo": ("selected_target_solo_woman", "control_selected_solo_woman")
         }
         
-        t_sub, c_sub = subdirs[mode]
-        t_dst = os.path.join(t_folder, t_sub, t_fname)
-        c_dst = os.path.join(c_folder, c_sub, c_fname)
+        t_sub, c_sub = folders[mode]
+        t_dst = os.path.join(target_root, t_sub, new_name)
+        c_dst = os.path.join(target_root, c_sub, new_name)
         
         os.makedirs(os.path.dirname(t_dst), exist_ok=True)
         os.makedirs(os.path.dirname(c_dst), exist_ok=True)
@@ -36,21 +66,8 @@ class SorterEngine:
         shutil.move(t_path, t_dst)
         shutil.copy2(c_path, c_dst)
         return t_dst, c_dst
-
-    @staticmethod
-    def move_to_unused_synced(t_p, c_p, t_folder, c_folder):
-        """Moves both to unused, renaming control to match target name."""
-        t_name = os.path.basename(t_p)
-        
-        t_un = os.path.join(t_folder, "unused", t_name)
-        c_un = os.path.join(c_folder, "unused", t_name) # Renamed to match target
-        
-        os.makedirs(os.path.dirname(t_un), exist_ok=True)
-        os.makedirs(os.path.dirname(c_un), exist_ok=True)
-        
-        shutil.move(t_p, t_un)
-        shutil.move(c_p, c_un)
-        return t_un, c_un
+    
+    # ... [revert_action, compress_for_web, load/save_favorites as previously defined] ...
 
     @staticmethod
     def revert_action(action):
