@@ -29,7 +29,7 @@ class SorterEngine:
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
             for cat in ["_TRASH", "Default", "Action", "Solo"]:
-                cursor.execute("INSERT INTO categories VALUES (?)", (cat,))
+                cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (cat,))
         
         conn.commit()
         conn.close()
@@ -70,25 +70,87 @@ class SorterEngine:
         return {r[0]: {"tab1_target": r[1], "tab2_target": r[2], "tab2_control": r[3], 
                        "tab4_source": r[4], "tab4_out": r[5], "mode": r[6]} for r in rows}
 
-    # --- IMAGE & ID SCANNING (CRITICAL) ---
+    # --- CATEGORY MANAGEMENT (WITH DISK RENAMING) ---
     @staticmethod
-    def get_images(path):
-        """Standard image scanner for directories."""
+    def get_categories():
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM categories ORDER BY name ASC")
+        cats = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return cats
+
+    @staticmethod
+    def add_category(name):
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def rename_category(old_name, new_name, output_base_path):
+        """Renames category in DB and renames the physical folder on disk."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        
+        # 1. Update Database
+        cursor.execute("UPDATE categories SET name = ? WHERE name = ?", (new_name, old_name))
+        
+        # 2. Rename on Disk
+        old_path = os.path.join(output_base_path, old_name)
+        new_path = os.path.join(output_base_path, new_name)
+        
+        if os.path.exists(old_path) and not os.path.exists(new_path):
+            os.rename(old_path, new_path)
+        
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def sync_categories_from_disk(output_path):
+        """Scans output directory and adds subfolders as DB categories."""
+        if not output_path or not os.path.exists(output_path): return 0
+        existing_folders = [d for d in os.listdir(output_path) 
+                            if os.path.isdir(os.path.join(output_path, d)) 
+                            and not d.startswith(".")]
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        added = 0
+        for folder in existing_folders:
+            cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (folder,))
+            if cursor.rowcount > 0: added += 1
+        conn.commit()
+        conn.close()
+        return added
+
+    # --- IMAGE & ID SCANNING ---
+    @staticmethod
+    def get_images(path, recursive=False):
+        """Standard image scanner with optional subfolder support."""
         exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
         if not path or not os.path.exists(path): return []
-        return sorted([f for f in os.listdir(path) if f.lower().endswith(exts)])
+        image_list = []
+        if recursive:
+            for root, _, files in os.walk(path):
+                for f in files:
+                    if f.lower().endswith(exts): image_list.append(os.path.join(root, f))
+        else:
+            for f in os.listdir(path):
+                if f.lower().endswith(exts): image_list.append(os.path.join(path, f))
+        return sorted(image_list)
 
     @staticmethod
     def get_id_mapping(path):
-        """Maps idXXX prefixes to lists of filenames to handle collisions."""
+        """Groups files by idXXX_ prefix to detect collisions."""
         mapping = {}
-        images = SorterEngine.get_images(path)
+        images = SorterEngine.get_images(path, recursive=False)
         for f in images:
-            if f.startswith("id") and "_" in f:
-                prefix = f.split('_')[0]
-                if prefix not in mapping:
-                    mapping[prefix] = []
-                mapping[prefix].append(f)
+            fname = os.path.basename(f)
+            if fname.startswith("id") and "_" in fname:
+                prefix = fname.split('_')[0]
+                if prefix not in mapping: mapping[prefix] = []
+                mapping[prefix].append(fname)
         return mapping
 
     @staticmethod
@@ -125,7 +187,6 @@ class SorterEngine:
     # --- FILE MANIPULATION ---
     @staticmethod
     def harmonize_names(t_p, c_p):
-        """Forces the control file to match the target name."""
         t_name = os.path.basename(t_p)
         new_c_p = os.path.join(os.path.dirname(c_p), t_name)
         if os.path.exists(new_c_p) and c_p != new_c_p:
@@ -136,7 +197,6 @@ class SorterEngine:
 
     @staticmethod
     def re_id_file(old_path, new_id_prefix):
-        """Changes the idXXX_ prefix to resolve collisions."""
         dir_name = os.path.dirname(old_path)
         old_name = os.path.basename(old_path)
         name_no_id = old_name.split('_', 1)[1] if '_' in old_name else old_name
@@ -147,7 +207,6 @@ class SorterEngine:
 
     @staticmethod
     def move_to_unused_synced(t_p, c_p, t_root, c_root):
-        """Moves a pair to 'unused' subfolders."""
         t_name = os.path.basename(t_p)
         t_un = os.path.join(t_root, "unused", t_name)
         c_un = os.path.join(c_root, "unused", t_name)
@@ -159,7 +218,6 @@ class SorterEngine:
 
     @staticmethod
     def restore_from_unused(t_p, c_p, t_root, c_root):
-        """Moves files back from 'unused' to main folders."""
         t_name = os.path.basename(t_p)
         t_dst = os.path.join(t_root, "selected_target", t_name)
         c_dst = os.path.join(c_root, "selected_control", t_name)
@@ -168,23 +226,6 @@ class SorterEngine:
         shutil.move(t_p, t_dst)
         shutil.move(c_p, c_dst)
         return t_dst, c_dst
-
-    @staticmethod
-    def get_categories():
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM categories ORDER BY name ASC")
-        cats = [r[0] for r in cursor.fetchall()]
-        conn.close()
-        return cats
-
-    @staticmethod
-    def add_category(name):
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
-        conn.commit()
-        conn.close()
 
     @staticmethod
     def compress_for_web(path, quality):
