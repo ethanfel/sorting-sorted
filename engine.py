@@ -52,6 +52,23 @@ class SorterEngine:
         except: return []
 
     @staticmethod
+    def restore_from_unused(t_p, c_p, t_root, c_root):
+        """Moves files from 'unused' folders back to 'selected' folders."""
+        t_name = os.path.basename(t_p)
+        # Define destination folders
+        t_dst_dir = os.path.join(t_root, "selected_target")
+        c_dst_dir = os.path.join(c_root, "selected_control")
+        
+        os.makedirs(t_dst_dir, exist_ok=True)
+        os.makedirs(c_dst_dir, exist_ok=True)
+        
+        t_dst = os.path.join(t_dst_dir, t_name)
+        c_dst = os.path.join(c_dst_dir, t_name) # Ensure synced name on restore
+        
+        shutil.move(t_p, t_dst)
+        shutil.move(c_p, c_dst)
+        return t_dst, c_dst
+    @staticmethod
     def harmonize_names(t_p, c_p):
         """Renames control to match target. Adds suffix if collision exists."""
         t_name = os.path.basename(t_p)
