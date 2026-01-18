@@ -45,14 +45,12 @@ class SorterEngine:
     # --- 2. PROFILE & PATH MANAGEMENT ---
     @staticmethod
     def save_tab_paths(profile_name, t1_t=None, t2_t=None, t2_c=None, t4_s=None, t4_o=None, mode=None, t5_s=None, t5_o=None):
-        """Updates specific tab paths in the database while preserving others."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM profiles WHERE name = ?", (profile_name,))
         row = cursor.fetchone()
         
         if not row:
-            # Default structure if profile is new (9 columns total)
             row = (profile_name, "/storage", "/storage", "/storage", "/storage", "/storage", "id", "/storage", "/storage")
             
         new_values = (
@@ -72,7 +70,6 @@ class SorterEngine:
 
     @staticmethod
     def load_profiles():
-        """Loads all workspace presets."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM profiles")
@@ -102,46 +99,14 @@ class SorterEngine:
         conn.commit()
         conn.close()
 
-    @staticmethod
-    def rename_category(old_name, new_name, output_base_path):
-        """Renames category in DB and renames the physical folder on disk."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE categories SET name = ? WHERE name = ?", (new_name, old_name))
-        
-        old_path = os.path.join(output_base_path, old_name)
-        new_path = os.path.join(output_base_path, new_name)
-        if os.path.exists(old_path) and not os.path.exists(new_path):
-            os.rename(old_path, new_path)
-        
-        conn.commit()
-        conn.close()
-
-    @staticmethod
-    def sync_categories_from_disk(output_path):
-        """Scans output directory and adds subfolders as DB categories."""
-        if not output_path or not os.path.exists(output_path): return 0
-        existing_folders = [d for d in os.listdir(output_path) if os.path.isdir(os.path.join(output_path, d)) and not d.startswith(".")]
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        added = 0
-        for folder in existing_folders:
-            cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (folder,))
-            if cursor.rowcount > 0: added += 1
-        conn.commit()
-        conn.close()
-        return added
-
     # --- 4. IMAGE & ID OPERATIONS ---
     @staticmethod
     def get_images(path, recursive=False):
-        """Image scanner with optional recursive subfolder support."""
         exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
         if not path or not os.path.exists(path): return []
         image_list = []
         if recursive:
             for root, _, files in os.walk(path):
-                # Skip the trash folder from scanning
                 if "_DELETED" in root: continue
                 for f in files:
                     if f.lower().endswith(exts): image_list.append(os.path.join(root, f))
@@ -152,7 +117,6 @@ class SorterEngine:
 
     @staticmethod
     def get_id_mapping(path):
-        """Maps idXXX prefixes for Tab 2 collision handling."""
         mapping = {}
         images = SorterEngine.get_images(path, recursive=False)
         for f in images:
@@ -175,28 +139,9 @@ class SorterEngine:
                 except: continue
         return max_id
 
-    @staticmethod
-    def get_folder_id(source_path):
-        """Retrieves or generates a persistent ID for a specific folder."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT folder_id FROM folder_ids WHERE path = ?", (source_path,))
-        result = cursor.fetchone()
-        if result:
-            fid = result[0]
-        else:
-            cursor.execute("SELECT MAX(folder_id) FROM folder_ids")
-            row = cursor.fetchone()
-            fid = (row[0] + 1) if row and row[0] else 1
-            cursor.execute("INSERT INTO folder_ids VALUES (?, ?)", (source_path, fid))
-            conn.commit()
-        conn.close()
-        return fid
-
     # --- 5. GALLERY STAGING & DELETION (TAB 5) ---
     @staticmethod
     def delete_to_trash(file_path):
-        """Moves a file to a local _DELETED subfolder for undo support."""
         if not os.path.exists(file_path): return None
         trash_dir = os.path.join(os.path.dirname(file_path), "_DELETED")
         os.makedirs(trash_dir, exist_ok=True)
@@ -206,7 +151,6 @@ class SorterEngine:
 
     @staticmethod
     def stage_image(original_path, category, new_name):
-        """Records a pending rename/move in the database."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)", (original_path, category, new_name))
@@ -215,7 +159,6 @@ class SorterEngine:
 
     @staticmethod
     def clear_staged_item(original_path):
-        """Removes an item from the pending staging area."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
@@ -224,17 +167,60 @@ class SorterEngine:
 
     @staticmethod
     def get_staged_data():
-        """Retrieves current tagged/staged images."""
+        """Retrieves current tagged/staged images with 'marked' status."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM staging_area")
         rows = cursor.fetchall()
         conn.close()
-        return {r[0]: {"cat": r[1], "name": r[2]} for r in rows}
+        # FIXED: Now includes the 'marked' key at index 3
+        return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
+
+    @staticmethod
+    def commit_batch(file_list, output_root, cleanup_mode):
+        """Commits ONLY the specific files provided in the list (Current Page)."""
+        data = SorterEngine.get_staged_data()
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        
+        for file_path in file_list:
+            if not os.path.exists(file_path): continue
+            
+            # --- CASE A: File is TAGGED ---
+            if file_path in data and data[file_path]['marked']:
+                info = data[file_path]
+                dest_dir = os.path.join(output_root, info['cat'])
+                os.makedirs(dest_dir, exist_ok=True)
+                
+                final_dst = os.path.join(dest_dir, info['name'])
+                
+                # Collision Safety
+                if os.path.exists(final_dst):
+                    root, ext = os.path.splitext(info['name'])
+                    c = 1
+                    while os.path.exists(final_dst):
+                         final_dst = os.path.join(dest_dir, f"{root}_{c}{ext}")
+                         c += 1
+                
+                shutil.move(file_path, final_dst)
+                cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
+                
+            # --- CASE B: File is UNTAGGED (Cleanup) ---
+            elif cleanup_mode != "Keep":
+                if cleanup_mode == "Move to Unused":
+                    parent = os.path.dirname(file_path)
+                    unused_dir = os.path.join(parent, "unused")
+                    os.makedirs(unused_dir, exist_ok=True)
+                    shutil.move(file_path, os.path.join(unused_dir, os.path.basename(file_path)))
+                elif cleanup_mode == "Delete":
+                    os.remove(file_path)
+        
+        conn.commit()
+        conn.close()
 
     @staticmethod
     def commit_staging(output_root, cleanup_mode, source_root=None):
-        """Commits staging: renames/moves tagged files and cleans unmarked ones."""
+        """Global commit (Legacy support for full folder commits)."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
@@ -262,7 +248,6 @@ class SorterEngine:
     # --- 6. CORE UTILITIES (SYNC & UNDO) ---
     @staticmethod
     def harmonize_names(t_p, c_p):
-        """Forces the 'control' file to match the 'target' file's name."""
         if not os.path.exists(t_p) or not os.path.exists(c_p): return c_p
         
         t_name = os.path.basename(t_p)
@@ -280,7 +265,6 @@ class SorterEngine:
 
     @staticmethod
     def re_id_file(old_path, new_id_prefix):
-        """Changes the idXXX_ prefix to resolve collisions."""
         dir_name = os.path.dirname(old_path)
         old_name = os.path.basename(old_path)
         name_no_id = old_name.split('_', 1)[1] if '_' in old_name else old_name
@@ -290,32 +274,7 @@ class SorterEngine:
         return new_path
 
     @staticmethod
-    def move_to_unused_synced(t_p, c_p, t_root, c_root):
-        """Moves a pair to 'unused' subfolders."""
-        t_name = os.path.basename(t_p)
-        t_un = os.path.join(t_root, "unused", t_name)
-        c_un = os.path.join(c_root, "unused", t_name)
-        os.makedirs(os.path.dirname(t_un), exist_ok=True)
-        os.makedirs(os.path.dirname(c_un), exist_ok=True)
-        shutil.move(t_p, t_un)
-        shutil.move(c_p, c_un)
-        return t_un, c_un
-
-    @staticmethod
-    def restore_from_unused(t_p, c_p, t_root, c_root):
-        """Moves files back from 'unused' to main folders."""
-        t_name = os.path.basename(t_p)
-        t_dst = os.path.join(t_root, "selected_target", t_name)
-        c_dst = os.path.join(c_root, "selected_control", t_name)
-        os.makedirs(os.path.dirname(t_dst), exist_ok=True)
-        os.makedirs(os.path.dirname(c_dst), exist_ok=True)
-        shutil.move(t_p, t_dst)
-        shutil.move(c_p, c_dst)
-        return t_dst, c_dst
-
-    @staticmethod
     def compress_for_web(path, quality):
-        """Compresses images for UI performance."""
         try:
             with Image.open(path) as img:
                 buf = BytesIO()
@@ -325,58 +284,9 @@ class SorterEngine:
 
     @staticmethod
     def revert_action(action):
-        """Undoes move operations."""
         if action['type'] == 'move' and os.path.exists(action['t_dst']):
             shutil.move(action['t_dst'], action['t_src'])
         elif action['type'] in ['unused', 'cat_move']:
             if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
             if 'c_dst' in action and os.path.exists(action['c_dst']):
                 shutil.move(action['c_dst'], action['c_src'])
-            
-    @staticmethod
-    def commit_batch(file_list, output_root, cleanup_mode):
-        """
-        Commits ONLY the specific files provided in the list (Current Page).
-        Handles renaming, moving, and cleanup for just these items.
-        """
-        data = SorterEngine.get_staged_data()
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        for file_path in file_list:
-            if not os.path.exists(file_path): continue
-            
-            # --- CASE A: File is TAGGED ---
-            if file_path in data and data[file_path]['marked']:
-                info = data[file_path]
-                dest_dir = os.path.join(output_root, info['cat'])
-                os.makedirs(dest_dir, exist_ok=True)
-                
-                final_dst = os.path.join(dest_dir, info['name'])
-                
-                # Collision Safety: If Action_001 exists, try Action_001_1
-                if os.path.exists(final_dst):
-                    root, ext = os.path.splitext(info['name'])
-                    c = 1
-                    while os.path.exists(final_dst):
-                         final_dst = os.path.join(dest_dir, f"{root}_{c}{ext}")
-                         c += 1
-                
-                shutil.move(file_path, final_dst)
-                
-                # Remove from staging database
-                cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
-                
-            # --- CASE B: File is UNTAGGED (Apply Cleanup) ---
-            elif cleanup_mode != "Keep":
-                if cleanup_mode == "Move to Unused":
-                    # Create 'unused' folder inside the source folder
-                    parent = os.path.dirname(file_path)
-                    unused_dir = os.path.join(parent, "unused")
-                    os.makedirs(unused_dir, exist_ok=True)
-                    shutil.move(file_path, os.path.join(unused_dir, os.path.basename(file_path)))
-                elif cleanup_mode == "Delete":
-                    os.remove(file_path)
-        
-        conn.commit()
-        conn.close()
