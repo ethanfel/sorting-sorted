@@ -295,3 +295,12 @@ class SorterEngine:
         cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def clear_staged_item(original_path):
+        """Surgically removes one item from staging."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
+        conn.commit()
+        conn.close()
