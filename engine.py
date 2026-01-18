@@ -332,3 +332,51 @@ class SorterEngine:
             if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
             if 'c_dst' in action and os.path.exists(action['c_dst']):
                 shutil.move(action['c_dst'], action['c_src'])
+            
+    @staticmethod
+    def commit_batch(file_list, output_root, cleanup_mode):
+        """
+        Commits ONLY the specific files provided in the list (Current Page).
+        Handles renaming, moving, and cleanup for just these items.
+        """
+        data = SorterEngine.get_staged_data()
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        
+        for file_path in file_list:
+            if not os.path.exists(file_path): continue
+            
+            # --- CASE A: File is TAGGED ---
+            if file_path in data and data[file_path]['marked']:
+                info = data[file_path]
+                dest_dir = os.path.join(output_root, info['cat'])
+                os.makedirs(dest_dir, exist_ok=True)
+                
+                final_dst = os.path.join(dest_dir, info['name'])
+                
+                # Collision Safety: If Action_001 exists, try Action_001_1
+                if os.path.exists(final_dst):
+                    root, ext = os.path.splitext(info['name'])
+                    c = 1
+                    while os.path.exists(final_dst):
+                         final_dst = os.path.join(dest_dir, f"{root}_{c}{ext}")
+                         c += 1
+                
+                shutil.move(file_path, final_dst)
+                
+                # Remove from staging database
+                cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
+                
+            # --- CASE B: File is UNTAGGED (Apply Cleanup) ---
+            elif cleanup_mode != "Keep":
+                if cleanup_mode == "Move to Unused":
+                    # Create 'unused' folder inside the source folder
+                    parent = os.path.dirname(file_path)
+                    unused_dir = os.path.join(parent, "unused")
+                    os.makedirs(unused_dir, exist_ok=True)
+                    shutil.move(file_path, os.path.join(unused_dir, os.path.basename(file_path)))
+                elif cleanup_mode == "Delete":
+                    os.remove(file_path)
+        
+        conn.commit()
+        conn.close()
