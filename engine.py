@@ -286,3 +286,12 @@ class SorterEngine:
             if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
             if 'c_dst' in action and os.path.exists(action['c_dst']):
                 shutil.move(action['c_dst'], action['c_src'])
+ 
+    @staticmethod
+    def clear_staged_item(original_path):
+        """Removes a specific image from the staging area."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
+        conn.commit()
+        conn.close()
