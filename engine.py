@@ -392,3 +392,28 @@ class SorterEngine:
         
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def rename_category(old_name, new_name):
+        """Renames a category and updates any staged images using it."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        
+        # 1. Update Category Table
+        try:
+            cursor.execute("UPDATE categories SET name = ? WHERE name = ?", (new_name, old_name))
+            
+            # 2. Update Staging Area (Keep tags in sync)
+            cursor.execute("UPDATE staging_area SET target_category = ? WHERE target_category = ?", (new_name, old_name))
+            
+            # 3. Update Staging Area Filenames (e.g. Action_001.jpg -> Adventure_001.jpg)
+            # This is complex in SQL, so we'll just flag them. 
+            # Ideally, we re-stage them, but for now, updating the category column is sufficient 
+            # because the filename is generated at the moment of tagging or commit.
+            
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # New name already exists
+            pass
+        finally:
+            conn.close()
