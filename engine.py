@@ -230,8 +230,9 @@ class SorterEngine:
         cursor.execute("SELECT * FROM staging_area")
         rows = cursor.fetchall()
         conn.close()
-        return {r[0]: {"cat": r[1], "name": r[2]} for r in rows}
-
+        # FIXED: Added "marked": r[3] to the dictionary
+        return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
+        
     @staticmethod
     def commit_staging(output_root, cleanup_mode, source_root=None):
         """Commits staging: renames/moves tagged files and cleans unmarked ones."""
