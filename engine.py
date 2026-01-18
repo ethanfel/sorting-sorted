@@ -417,3 +417,13 @@ class SorterEngine:
             pass
         finally:
             conn.close()
+
+    @staticmethod
+    def delete_category(name):
+        """Deletes a category and clears any staged tags associated with it."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
+        cursor.execute("DELETE FROM staging_area WHERE target_category = ?", (name,))
+        conn.commit()
+        conn.close()
