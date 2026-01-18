@@ -237,16 +237,18 @@ def render(quality, profile_name):
 
     # --- NAVIGATION BAR COMPONENT ---
     def nav_controls(key_suffix):
-        # Layout: [Prev] [Number Input] [Next]
-        c1, c2, c3 = st.columns([1, 2, 1], vertical_alignment="center")
+        # New Layout: [Prev] [Input Box] ["/ 15"] [Next]
+        c1, c2, c3, c4 = st.columns([1.5, 1, 0.5, 1.5], vertical_alignment="center")
         
+        # 1. Previous Button
         c1.button("⬅️ Prev", 
                   disabled=(st.session_state.t5_page == 0), 
                   on_click=cb_change_page, args=(-1,), 
                   key=f"p_{key_suffix}", use_container_width=True)
         
+        # 2. Page Selector (Number Input)
         c2.number_input(
-            "Go to Page", 
+            "Page", 
             min_value=1, max_value=total_pages, 
             value=st.session_state.t5_page + 1, 
             step=1,
@@ -255,7 +257,11 @@ def render(quality, profile_name):
             on_change=cb_jump_page, args=(f"jump_{key_suffix}",)
         )
         
-        c3.button("Next ➡️", 
+        # 3. Total Page Count Display
+        c3.markdown(f"<div style='text-align: left; font-weight: bold;'>/ {total_pages}</div>", unsafe_allow_html=True)
+        
+        # 4. Next Button
+        c4.button("Next ➡️", 
                   disabled=(st.session_state.t5_page >= total_pages - 1), 
                   on_click=cb_change_page, args=(1,), 
                   key=f"n_{key_suffix}", use_container_width=True)
