@@ -32,7 +32,7 @@ with st.sidebar:
         st.rerun()
 
 # --- TABS ---
-t1, t2, t3, t4 = st.tabs(["🕒 1. Discovery", "🆔 2. ID Review", "♻️ 3. Unused", "📂 4. Category Sorter"])
+t1, t2, t3, t4, t5 = st.tabs(["Discovery", "Review", "Unused", "Categorizer", "🖼️ Gallery Sorter"])
 
 with t1:
     path_t1 = st.text_input("Discovery Target", value=p_data.get("tab1_target", "/storage"), key="t1_input")
@@ -62,3 +62,7 @@ with t4:
         SorterEngine.save_tab_paths(selected_profile, t4_s=path_t4_s, t4_o=path_t4_o, mode=mode)
     
     tab_category_sorter.render(path_t4_s, path_t4_o, quality, mode)
+
+with t5:
+    import tab_gallery_sorter
+    tab_gallery_sorter.render(quality)
