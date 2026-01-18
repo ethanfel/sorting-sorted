@@ -32,9 +32,10 @@ if not profiles:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("⭐ Workspaces")
-    selected_profile = st.selectbox("Active Workspace", list(profiles.keys()), key="active_profile")
-    p_data = profiles.get(selected_profile, {})
+    st.divider()
+    with st.expander("🔍 Path Debugger"):
+        st.write(f"**Active Workspace:** {selected_profile}")
+        st.json(p_data) # Shows exactly what the DB sees for this profile
 
     st.divider()
     quality = st.slider("Display Quality", 5, 100, 40)
@@ -79,4 +80,4 @@ with t4:
 
 with t5:
     # Tab 5 should not depend on Tab 4 paths at all
-    tab_gallery_sorter.render(quality)
+    tab_gallery_sorter.render(quality, selected_profile)
