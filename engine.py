@@ -346,7 +346,7 @@ class SorterEngine:
             if 'c_dst' in action and os.path.exists(action['c_dst']):
                 shutil.move(action['c_dst'], action['c_src'])
             
-@staticmethod
+    @staticmethod
     def commit_batch(file_list, output_root, cleanup_mode):
         """
         Commits files directly to the output root (No Subfolders).
