@@ -1,73 +1,82 @@
 import streamlit as st
 import os
 from engine import SorterEngine
+import tab_time_discovery, tab_id_review, tab_unused_review, tab_category_sorter, tab_gallery_sorter
 
-def render(quality):
-    # 1. Fetch Profile Data from DB
+# 1. Initialize DB FIRST
+try:
+    SorterEngine.init_db()
+except Exception as e:
+    st.error(f"Database Initialization Error: {e}")
+
+st.set_page_config(layout="wide", page_title="Turbo Sorter Pro v12.1")
+
+# 2. Session State Defaults
+if 'history' not in st.session_state: st.session_state.history = []
+if 'idx_time' not in st.session_state: st.session_state.idx_time = 0
+if 'idx_id' not in st.session_state: st.session_state.idx_id = 0
+if 'idx_unused' not in st.session_state: st.session_state.idx_unused = 0
+if 'idx_cat' not in st.session_state: st.session_state.idx_cat = 0
+
+# 3. Load Profiles with Safety Fallback
+try:
     profiles = SorterEngine.load_profiles()
-    active_profile = st.session_state.get('active_profile', 'Default')
-    p_data = profiles.get(active_profile, {})
+except Exception as e:
+    st.warning("Database schema mismatch detected. Please delete /app/sorter_database.db and refresh.")
+    st.stop()
 
-    st.subheader("🖼️ Gallery Staging Sorter")
-    
-    # --- PATH INPUTS (This is what was missing) ---
-    c1, c2 = st.columns(2)
-    path_s = c1.text_input("📁 Source Gallery Folder", 
-                           value=p_data.get("tab5_source", "/storage"), 
-                           key="t5_path_s_input")
-    path_o = c2.text_input("🎯 Final Output Root", 
-                           value=p_data.get("tab5_out", "/storage"), 
-                           key="t5_path_o_input")
-    
-    # Save paths to DB immediately if they change
-    if path_s != p_data.get("tab5_source") or path_o != p_data.get("tab5_out"):
-        SorterEngine.save_tab_paths(active_profile, t5_s=path_s, t5_o=path_o)
+# Ensure at least one profile exists
+if not profiles:
+    SorterEngine.save_tab_paths("Default")
+    profiles = SorterEngine.load_profiles()
 
-    # --- SETTINGS ---
-    col_opt1, col_opt2 = st.columns(2)
-    recursive = col_opt1.toggle("🔍 Search Subfolders", value=True)
-    cleanup = col_opt2.radio("Cleanup Unmarked Files:", 
-                             ["Keep", "Move to Unused", "Delete"], 
-                             horizontal=True)
-
-    if not path_s or not os.path.exists(path_s):
-        st.warning("Please enter a valid Source Path to load the gallery.")
-        return
-
-    # --- SIDEBAR CATEGORIES ---
-    cats = SorterEngine.get_categories()
-    selected_cat = st.sidebar.radio("🏷️ Current Tag", cats, key="gallery_active_cat")
-
-    # --- GALLERY RENDERING ---
-    images = SorterEngine.get_images(path_s, recursive=recursive)
-    staged = SorterEngine.get_staged_data()
-    
-    st.write(f"Images: **{len(images)}** | Staged for Rename: **{len(staged)}**")
-
-    # Grid Display
-    cols = st.columns(4)
-    for idx, img_path in enumerate(images):
-        with cols[idx % 4]:
-            is_staged = img_path in staged
-            
-            # Show the new name if tagged
-            label = f"✅ {staged[img_path]['name']}" if is_staged else os.path.basename(img_path)
-            
-            st.image(SorterEngine.compress_for_web(img_path, quality), caption=label)
-            
-            if st.button("Tag" if not is_staged else "Untag", key=f"gal_btn_{idx}"):
-                if not is_staged:
-                    ext = os.path.splitext(img_path)[1]
-                    # Logic to count current category items for the suffix
-                    cat_count = len([v for v in staged.values() if v['cat'] == selected_cat]) + 1
-                    new_name = f"{selected_cat}_{cat_count:03d}{ext}"
-                    SorterEngine.stage_image(img_path, selected_cat, new_name)
-                st.rerun()
+# --- SIDEBAR ---
+with st.sidebar:
+    st.title("⭐ Workspaces")
+    selected_profile = st.selectbox("Active Workspace", list(profiles.keys()), key="active_profile")
+    p_data = profiles.get(selected_profile, {})
 
     st.divider()
+    quality = st.slider("Display Quality", 5, 100, 40)
     
-    if st.button("🚀 APPLY ALL CHANGES TO DISK", type="primary", use_container_width=True):
-        if staged:
-            SorterEngine.commit_staging(path_o, cleanup, source_root=path_s)
-            st.success("Disk sync complete!")
-            st.rerun()
+    # Prefix Logic
+    disc_target = p_data.get("tab1_target", "/storage")
+    next_id_num = SorterEngine.get_max_id_number(disc_target) + 1
+    id_val = st.number_input("Next ID Number", value=next_id_num)
+    prefix = f"id{int(id_val):03d}_"
+
+    if st.button("↶ UNDO", use_container_width=True, disabled=not st.session_state.history):
+        SorterEngine.revert_action(st.session_state.history.pop())
+        st.rerun()
+
+# --- TABS ---
+t1, t2, t3, t4, t5 = st.tabs(["🕒 Discovery", "🆔 ID Review", "♻️ Unused", "📂 Categorizer", "🖼️ Gallery Staging"])
+
+with t1:
+    path_t1 = st.text_input("Discovery Target", value=p_data.get("tab1_target", "/storage"), key="t1_in")
+    if path_t1 != p_data.get("tab1_target"):
+        SorterEngine.save_tab_paths(selected_profile, t1_t=path_t1)
+    tab_time_discovery.render(path_t1, quality, 50, prefix)
+
+with t2:
+    c1, c2 = st.columns(2)
+    path_t2_t = c1.text_input("Review Target", value=p_data.get("tab2_target", "/storage"), key="t2_t_in")
+    path_t2_c = c2.text_input("Review Control", value=p_data.get("tab2_control", "/storage"), key="t2_c_in")
+    if path_t2_t != p_data.get("tab2_target") or path_t2_c != p_data.get("tab2_control"):
+        SorterEngine.save_tab_paths(selected_profile, t2_t=path_t2_t, t2_c=path_t2_c)
+    tab_id_review.render(path_t2_t, path_t2_c, quality, prefix)
+
+with t3:
+    tab_unused_review.render(path_t2_t, path_t2_c, quality)
+
+with t4:
+    c1, c2 = st.columns(2)
+    p4_s = c1.text_input("Source", value=p_data.get("tab4_source", "/storage"), key="t4_s_in")
+    p4_o = c2.text_input("Output", value=p_data.get("tab4_out", "/storage"), key="t4_o_in")
+    mode = st.radio("Mode", ["id", "original"], index=0 if p_data.get("mode") == "id" else 1, horizontal=True)
+    if p4_s != p_data.get("tab4_source") or p4_o != p_data.get("tab4_out") or mode != p_data.get("mode"):
+        SorterEngine.save_tab_paths(selected_profile, t4_s=p4_s, t4_o=p4_o, mode=mode)
+    tab_category_sorter.render(p4_s, p4_o, quality, mode)
+
+with t5:
+    tab_gallery_sorter.render(quality)
