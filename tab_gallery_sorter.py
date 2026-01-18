@@ -34,6 +34,11 @@ def cb_apply_batch(current_batch, path_o, cleanup_mode):
     """Commits the batch to disk."""
     SorterEngine.commit_batch(current_batch, path_o, cleanup_mode)
 
+def cb_change_page(delta):
+    """Updates the page number before the script runs."""
+    if 't5_page' not in st.session_state:
+        st.session_state.t5_page = 0
+    st.session_state.t5_page += delta
 
 # ==========================================
 # 2. FRAGMENT: SIDEBAR (Category Manager)
@@ -237,25 +242,35 @@ def render(quality, profile_name):
 
     total_items = len(all_images)
     total_pages = math.ceil(total_items / page_size)
-    if st.session_state.t5_page >= total_pages: st.session_state.t5_page = max(0, total_pages - 1)
+    if st.session_state.t5_page >= total_pages: 
+        st.session_state.t5_page = max(0, total_pages - 1)
+    if st.session_state.t5_page < 0: 
+        st.session_state.t5_page = 0
     
     start_idx = st.session_state.t5_page * page_size
     end_idx = start_idx + page_size
     current_batch = all_images[start_idx:end_idx]
 
-    # --- NAVIGATION CONTROLS ---
+    # --- NAVIGATION CONTROLS (Optimized) ---
     def nav_controls(key):
         c1, c2, c3 = st.columns([1, 2, 1])
-        if c1.button("⬅️ Prev", disabled=(st.session_state.t5_page==0), key=f"p_{key}"):
-            st.session_state.t5_page -= 1
-            st.rerun()
-        c2.markdown(f"<div style='text-align:center'><b>Page {st.session_state.t5_page+1} / {total_pages}</b></div>", unsafe_allow_html=True)
-        if c3.button("Next ➡️", disabled=(st.session_state.t5_page>=total_pages-1), key=f"n_{key}"):
-            st.session_state.t5_page += 1
-            st.rerun()
-
-    nav_controls("top")
-    st.divider()
+        
+        # Previous Button
+        # We pass -1 to the callback to subtract a page
+        c1.button("⬅️ Prev", 
+                  disabled=(st.session_state.t5_page == 0), 
+                  on_click=cb_change_page, args=(-1,), 
+                  key=f"p_{key}")
+        
+        # Page Indicator
+        c2.markdown(f"<div style='text-align:center; padding-top: 5px;'><b>Page {st.session_state.t5_page + 1} / {total_pages}</b></div>", unsafe_allow_html=True)
+        
+        # Next Button
+        # We pass 1 to the callback to add a page
+        c3.button("Next ➡️", 
+                  disabled=(st.session_state.t5_page >= total_pages - 1), 
+                  on_click=cb_change_page, args=(1,), 
+                  key=f"n_{key}")
 
     # --- RENDER GALLERY (FRAGMENT) ---
     render_gallery_grid(current_batch, quality, grid_cols)
