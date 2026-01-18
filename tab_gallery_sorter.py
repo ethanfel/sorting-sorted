@@ -2,91 +2,68 @@ import streamlit as st
 import os
 from engine import SorterEngine
 
-def render(quality, profile_name):
-    st.subheader("🖼️ Gallery Staging Sorter")
-    
-    # 1. Load Workspace Settings
-    profiles = SorterEngine.load_profiles()
-    p_data = profiles.get(profile_name, {})
+@st.fragment
+def gallery_grid(images, staged, quality, selected_cat):
+    cols = st.columns(4)
+    for idx, img_path in enumerate(images):
+        with cols[idx % 4]:
+            is_staged = img_path in staged
+            
+            with st.container(border=True):
+                # Header: Name and Delete X
+                c_name, c_del = st.columns([5, 1])
+                c_name.caption(os.path.basename(img_path)[:20])
+                if c_del.button("❌", key=f"del_{idx}"):
+                    trash_p = SorterEngine.delete_to_trash(img_path)
+                    st.session_state.history.append({'type': 'move', 't_src': img_path, 't_dst': trash_p})
+                    st.rerun()
 
-    c1, c2 = st.columns(2)
-    path_s = c1.text_input("📁 Source Gallery Folder", value=p_data.get("tab5_source") or "/storage", key="t5_s_path")
-    path_o = c2.text_input("🎯 Final Output Root", value=p_data.get("tab5_out") or "/storage", key="t5_o_path")
-    
-    if path_s != p_data.get("tab5_source") or path_o != p_data.get("tab5_out"):
-        if st.button("💾 Save Gallery Paths"):
-            SorterEngine.save_tab_paths(profile_name, t5_s=path_s, t5_o=path_o)
-            st.rerun()
-
-    # --- 2. SIDEBAR CATEGORIES ---
-    with st.sidebar:
-        st.divider()
-        st.subheader("🏷️ Category Manager")
-        new_cat = st.text_input("Quick Add Category", key="t5_add_cat")
-        if st.button("➕ Add", use_container_width=True):
-            if new_cat:
-                SorterEngine.add_category(new_cat)
-                st.rerun()
-
-        st.divider()
-        cats = SorterEngine.get_categories()
-        if not cats:
-            st.warning("No categories found.")
-            return
-        selected_cat = st.radio("Active Tag:", cats, key="t5_active_tag")
-
-    if not os.path.exists(path_s):
-        st.info("Please enter a valid Source Path.")
-        return
-
-    # --- 3. THE FRAGMENTED GALLERY ---
-    # This decorator prevents the whole app from rerunning when tagging
-    @st.fragment
-    def render_gallery():
-        images = SorterEngine.get_images(path_s, recursive=True)
-        staged = SorterEngine.get_staged_data()
-        
-        st.write(f"Images: **{len(images)}** | Tagged: **{len(staged)}**")
-        
-        cols = st.columns(4)
-        for idx, img_path in enumerate(images):
-            with cols[idx % 4]:
-                is_staged = img_path in staged
-                
-                # Visual Tag Indicators
+                # Visual tag indicator
                 if is_staged:
-                    info = staged[img_path]
-                    st.markdown(f"**✅ {info['cat']}**")
-                    label = info['name']
-                else:
-                    label = os.path.basename(img_path)
+                    st.success(f"Tagged: {staged[img_path]['cat']}")
+
+                img_data = SorterEngine.compress_for_web(img_path, quality)
+                if img_data:
+                    st.image(img_data, use_container_width=True)
                 
-                st.image(SorterEngine.compress_for_web(img_path, quality), caption=label)
-                
-                # Action Buttons inside Fragment
+                # Simplified Button
                 if not is_staged:
-                    if st.button(f"Tag: {selected_cat}", key=f"tag_{idx}"):
+                    if st.button("Tag", key=f"tg_{idx}", use_container_width=True):
                         ext = os.path.splitext(img_path)[1]
                         count = len([v for v in staged.values() if v['cat'] == selected_cat]) + 1
                         new_name = f"{selected_cat}_{count:03d}{ext}"
                         SorterEngine.stage_image(img_path, selected_cat, new_name)
-                        st.rerun(scope="fragment") # Reruns ONLY the gallery
+                        st.rerun()
                 else:
-                    if st.button("❌ Remove", key=f"clear_{idx}"):
+                    if st.button("Untag", key=f"utg_{idx}", use_container_width=True):
                         SorterEngine.clear_staged_item(img_path)
-                        st.rerun(scope="fragment")
+                        st.rerun()
 
-    # Call the fragmented gallery
-    render_gallery()
-
-    st.divider()
+def render(quality, profile_name):
+    profiles = SorterEngine.load_profiles()
+    p_data = profiles.get(profile_name, {})
     
-    # --- 4. APPLY (Outside fragment to ensure full refresh after disk move) ---
-    cleanup = st.radio("Unmarked Files Action:", ["Keep", "Move to Unused", "Delete"], horizontal=True)
-    if st.button("🚀 APPLY ALL CHANGES TO DISK", type="primary", use_container_width=True):
-        if staged := SorterEngine.get_staged_data():
-            SorterEngine.commit_staging(path_o, cleanup, source_root=path_s)
-            st.success("Successfully processed images!")
+    c1, c2 = st.columns(2)
+    path_s = c1.text_input("Source Folder", value=p_data.get("tab5_source", "/storage"), key="t5_s")
+    path_o = c2.text_input("Output Folder", value=p_data.get("tab5_out", "/storage"), key="t5_o")
+    
+    if path_s != p_data.get("tab5_source") or path_o != p_data.get("tab5_out"):
+        if st.button("Save Paths"):
+            SorterEngine.save_tab_paths(profile_name, t5_s=path_s, t5_o=path_o)
             st.rerun()
 
-render_gallery = render # Mapping for the tab loader
+    cats = SorterEngine.get_categories()
+    selected_cat = st.sidebar.radio("Active Tag", cats)
+    
+    if not os.path.exists(path_s): return
+
+    images = SorterEngine.get_images(path_s, recursive=True)
+    staged = SorterEngine.get_staged_data()
+    
+    gallery_grid(images, staged, quality, selected_cat)
+
+    st.divider()
+    cleanup = st.radio("Unmarked Files:", ["Keep", "Move to Unused", "Delete"], horizontal=True)
+    if st.button("APPLY CHANGES", type="primary", use_container_width=True):
+        SorterEngine.commit_staging(path_o, cleanup, source_root=path_s)
+        st.rerun()
