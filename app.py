@@ -69,14 +69,14 @@ with t2:
 with t3:
     tab_unused_review.render(path_t2_t, path_t2_c, quality)
 
+# Inside your app.py tabs section
 with t4:
-    c1, c2 = st.columns(2)
-    p4_s = c1.text_input("Source", value=p_data.get("tab4_source", "/storage"), key="t4_s_in")
-    p4_o = c2.text_input("Output", value=p_data.get("tab4_out", "/storage"), key="t4_o_in")
-    mode = st.radio("Mode", ["id", "original"], index=0 if p_data.get("mode") == "id" else 1, horizontal=True)
-    if p4_s != p_data.get("tab4_source") or p4_o != p_data.get("tab4_out") or mode != p_data.get("mode"):
-        SorterEngine.save_tab_paths(selected_profile, t4_s=p4_s, t4_o=p4_o, mode=mode)
+    # Ensure variables exist even if DB row is fresh
+    p4_s = p_data.get("tab4_source") or "/storage"
+    p4_o = p_data.get("tab4_out") or "/storage"
+    mode = p_data.get("mode") or "id"
     tab_category_sorter.render(p4_s, p4_o, quality, mode)
 
 with t5:
+    # Tab 5 should not depend on Tab 4 paths at all
     tab_gallery_sorter.render(quality)
