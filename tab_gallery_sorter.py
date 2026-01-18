@@ -1,65 +1,64 @@
 import streamlit as st
-import os, shutil
+import os
 from engine import SorterEngine
 
-def render(path_s, path_o, quality):
+def render(quality):
+    # 1. Configuration Header
+    st.header("🖼️ Gallery Staging Sorter")
+    c1, c2 = st.columns(2)
+    path_s = c1.text_input("Source Gallery Path", key="t5_src")
+    path_o = c2.text_input("Final Output Root", key="t5_out")
+    
+    recursive = st.checkbox("Include Subfolders", value=True)
+    cleanup = st.radio("Unmarked Files Action:", ["Keep in Source", "Move to Unused", "Delete Permanent"], horizontal=True)
+
     if not path_s or not os.path.exists(path_s):
-        st.warning("Select a Source Folder with PNGs.")
+        st.info("Select a valid source folder to begin.")
         return
 
-    # 1. Setup State
-    if 'sorted_files' not in st.session_state: st.session_state.sorted_files = []
-    
-    # 2. Controls
-    col_a, col_b, col_c = st.columns([2, 1, 1])
-    recursive = col_a.toggle("Recursive Scan (Include Subfolders)", value=True)
+    # 2. Sidebar for Categories
+    with st.sidebar:
+        st.divider()
+        st.subheader("📁 Staging Categories")
+        cats = SorterEngine.get_categories()
+        selected_cat = st.radio("Active Category", cats)
+        
+        new_cat = st.text_input("Add Category")
+        if st.button("➕ Add"):
+            SorterEngine.add_category(new_cat)
+            st.rerun()
+
+    # 3. Gallery Display
     images = SorterEngine.get_images(path_s, recursive=recursive)
-    categories = SorterEngine.get_categories()
-
-    # 3. Gallery Grid
-    st.write(f"### Gallery ({len(images)} images found)")
+    staged = SorterEngine.get_staged_data()
     
-    # CSS to dim sorted images
-    st.markdown("""
-        <style>
-        .sorted-img { opacity: 0.3; filter: grayscale(100%); border: 2px solid green; }
-        </style>
-    """, unsafe_allow_safe_html=True)
+    st.write(f"Total Images: {len(images)} | Staged: {len([i for i in staged.values() if i['marked']])}")
 
-    cols = st.columns(4) # Adjust for gallery density
+    # Display images in a grid
+    cols = st.columns(4)
     for idx, img_path in enumerate(images):
         with cols[idx % 4]:
-            is_sorted = img_path in st.session_state.sorted_files
-            img_class = "sorted-img" if is_sorted else ""
+            is_staged = img_path in staged
+            border_style = "4px solid green" if is_staged else "1px solid gray"
             
-            # Display Image
+            # Clickable Image logic
             st.image(SorterEngine.compress_for_web(img_path, quality), 
-                     use_container_width=True, 
-                     caption="Sorted" if is_sorted else os.path.basename(img_path))
+                     caption=os.path.basename(img_path))
             
-            # Action Button per image (Slide/Select equivalent)
-            if not is_sorted:
-                selected_cat = st.selectbox("Move to...", ["None"] + categories, key=f"sel_{img_path}")
-                if selected_cat != "None":
-                    dst = os.path.join(path_o, selected_cat, os.path.basename(img_path))
-                    os.makedirs(os.path.dirname(dst), exist_ok=True)
-                    shutil.move(img_path, dst)
-                    st.session_state.sorted_files.append(img_path)
-                    st.rerun()
+            if st.button("Tag" if not is_staged else "Untag", key=f"tag_{idx}"):
+                if not is_staged:
+                    # Calculate new name based on category count
+                    ext = os.path.splitext(img_path)[1]
+                    cat_count = len([v for v in staged.values() if v['cat'] == selected_cat]) + 1
+                    new_name = f"{selected_cat}_{cat_count:03d}{ext}"
+                    SorterEngine.stage_image(img_path, selected_cat, new_name)
+                else:
+                    # Logic to remove from staging...
+                    pass
+                st.rerun()
 
     st.divider()
-    
-    # 4. Finish Logic
-    st.write("### Finish Project")
-    col_f1, col_f2 = st.columns(2)
-    if col_f1.button("🔥 Delete Remaining Unsorted", type="primary"):
-        unsorted = [p for p in images if p not in st.session_state.sorted_files]
-        SorterEngine.bulk_cleanup(unsorted, action="delete")
-        st.success("Deleted unsorted files.")
-        st.rerun()
-        
-    if col_f2.button("📦 Move Remaining to Unused"):
-        unsorted = [p for p in images if p not in st.session_state.sorted_files]
-        SorterEngine.bulk_cleanup(unsorted, action="unused", root_path=path_s)
-        st.success("Moved unsorted to Unused.")
+    if st.button("🚀 APPLY ALL CHANGES TO DISK", type="primary", use_container_width=True):
+        SorterEngine.commit_staging(path_o, cleanup)
+        st.success("Files successfully moved and renamed on disk!")
         st.rerun()
