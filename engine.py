@@ -235,17 +235,29 @@ class SorterEngine:
         
     @staticmethod
     def commit_staging(output_root, cleanup_mode, source_root=None):
-        """Commits staging: renames/moves tagged files and cleans unmarked ones."""
+        """Global commit directly to output root (No Subfolders)."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         staged_paths = set(data.keys())
         
+        if not os.path.exists(output_root):
+            os.makedirs(output_root, exist_ok=True)
+        
         for old_p, info in data.items():
             if os.path.exists(old_p):
-                dest_dir = os.path.join(output_root, info['cat'])
-                os.makedirs(dest_dir, exist_ok=True)
-                shutil.move(old_p, os.path.join(dest_dir, info['name']))
+                # CHANGED: Direct move to root
+                final_dst = os.path.join(output_root, info['name'])
+                
+                # Collision Safety for global commit
+                if os.path.exists(final_dst):
+                    root, ext = os.path.splitext(info['name'])
+                    c = 1
+                    while os.path.exists(final_dst):
+                         final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
+                         c += 1
+
+                shutil.move(old_p, final_dst)
         
         if cleanup_mode != "Keep" and source_root:
             for img_p in SorterEngine.get_images(source_root, recursive=True):
@@ -334,15 +346,18 @@ class SorterEngine:
             if 'c_dst' in action and os.path.exists(action['c_dst']):
                 shutil.move(action['c_dst'], action['c_src'])
             
-    @staticmethod
+@staticmethod
     def commit_batch(file_list, output_root, cleanup_mode):
         """
-        Commits ONLY the specific files provided in the list (Current Page).
-        Handles renaming, moving, and cleanup for just these items.
+        Commits files directly to the output root (No Subfolders).
         """
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
+        
+        # Ensure output root exists
+        if not os.path.exists(output_root):
+            os.makedirs(output_root, exist_ok=True)
         
         for file_path in file_list:
             if not os.path.exists(file_path): continue
@@ -350,28 +365,24 @@ class SorterEngine:
             # --- CASE A: File is TAGGED ---
             if file_path in data and data[file_path]['marked']:
                 info = data[file_path]
-                dest_dir = os.path.join(output_root, info['cat'])
-                os.makedirs(dest_dir, exist_ok=True)
                 
-                final_dst = os.path.join(dest_dir, info['name'])
+                # CHANGED: Destination is now directly the output_root, not a subfolder
+                final_dst = os.path.join(output_root, info['name'])
                 
-                # Collision Safety: If Action_001 exists, try Action_001_1
+                # Collision Safety: If Action_001.jpg exists, try Action_001_1.jpg
                 if os.path.exists(final_dst):
                     root, ext = os.path.splitext(info['name'])
                     c = 1
                     while os.path.exists(final_dst):
-                         final_dst = os.path.join(dest_dir, f"{root}_{c}{ext}")
+                         final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
                          c += 1
                 
                 shutil.move(file_path, final_dst)
-                
-                # Remove from staging database
                 cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
                 
-            # --- CASE B: File is UNTAGGED (Apply Cleanup) ---
+            # --- CASE B: File is UNTAGGED (Cleanup) ---
             elif cleanup_mode != "Keep":
                 if cleanup_mode == "Move to Unused":
-                    # Create 'unused' folder inside the source folder
                     parent = os.path.dirname(file_path)
                     unused_dir = os.path.join(parent, "unused")
                     os.makedirs(unused_dir, exist_ok=True)
