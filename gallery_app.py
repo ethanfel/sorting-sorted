@@ -155,9 +155,11 @@ def action_apply_page():
     ui.notify(f"Page Processed ({state.batch_mode})", type='positive')
     load_images()
 
-def action_apply_global():
-    ui.notify("Starting Global Apply...")
-    run.io_bound(SorterEngine.commit_global, state.output_dir, state.cleanup_mode, state.batch_mode, state.source_dir)
+# --- FIX 2: ASYNC GLOBAL APPLY ---
+async def action_apply_global():
+    ui.notify("Starting Global Apply... This may take a while.")
+    # Must use 'await' with io_bound to actually wait for completion
+    await run.io_bound(SorterEngine.commit_global, state.output_dir, state.cleanup_mode, state.batch_mode, state.source_dir)
     load_images()
     ui.notify("Global Apply Complete!", type='positive')
 
@@ -179,16 +181,26 @@ def render_sidebar():
     with sidebar_container:
         ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2 text-white')
         
-        # Grid Preview
+        # --- FIX 1: SIDEBAR GRID CLICK ---
         with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
+            
+            # Explicit function to handle the logic
+            def click_grid(num, used):
+                state.next_index = num
+                # Safety check: ensure number exists in map before opening
+                if used and num in state.index_map: 
+                    open_zoom_dialog(state.index_map[num], f"{state.active_cat} #{num}")
+                render_sidebar()
+
             for i in range(1, 26):
                 is_used = i in state.index_map
                 color = 'green' if is_used else 'grey-9'
-                def click_grid(num=i, used=is_used):
-                    state.next_index = num
-                    if used: open_zoom_dialog(state.index_map[num], f"{state.active_cat} #{num}")
-                    render_sidebar()
-                ui.button(str(i), on_click=click_grid).props(f'color={color} size=sm flat').classes('w-full border border-gray-800')
+                
+                # LAMBDA FIX: Capture 'i' (n) and 'is_used' (u) properly. 
+                # Ignore the first arg 'e' (ClickEvent)
+                ui.button(str(i), on_click=lambda e, n=i, u=is_used: click_grid(n, u)) \
+                  .props(f'color={color} size=sm flat') \
+                  .classes('w-full border border-gray-800')
         
         # Category Select
         categories = SorterEngine.get_categories() or ["Default"]
@@ -221,7 +233,7 @@ def render_sidebar():
 def render_gallery():
     grid_container.clear()
     batch = get_current_batch()
-    thumb_size = 800 # High res for crisp scaling
+    thumb_size = 800 
     
     with grid_container:
         with ui.grid(columns=state.grid_cols).classes('w-full gap-3'):
@@ -236,9 +248,7 @@ def render_gallery():
                             ui.button(icon='zoom_in', on_click=lambda p=img_path: open_zoom_dialog(p)).props('flat size=sm dense color=white')
                             ui.button(icon='delete', on_click=lambda p=img_path: action_delete(p)).props('flat size=sm dense color=red')
 
-                    # --- IMAGE RENDERING FIX ---
-                    # 1. w-full h-64: Forces the black box to be exactly 256px tall and full column width.
-                    # 2. fit=contain: PROPS are key here. This tells Quasar/HTML to fit the whole image INSIDE that box.
+                    # Image
                     ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
                         .classes('w-full h-64 bg-black rounded') \
                         .props('fit=contain no-spinner')
