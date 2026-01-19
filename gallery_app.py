@@ -24,7 +24,7 @@ class AppState:
         self.page = 0
         self.page_size = 24
         self.grid_cols = 4
-        self.preview_quality = 50 # Default compression level
+        self.preview_quality = 50 
         
         # Tagging State
         self.active_cat = "Default"
@@ -38,7 +38,7 @@ class AppState:
         self.all_images = []
         self.staged_data = {}
         self.green_dots = set()
-        self.index_map = {} # {number: path_to_image}
+        self.index_map = {} 
 
     def load_active_profile(self):
         p_data = self.profiles.get(self.profile_name, {})
@@ -56,15 +56,12 @@ class AppState:
 state = AppState()
 
 # ==========================================
-# 2. IMAGE SERVING API (Dynamic Quality)
+# 2. IMAGE SERVING API
 # ==========================================
 
 @app.get('/thumbnail')
 async def get_thumbnail(path: str, size: int = 400, q: int = 50):
-    """
-    Serves WebP thumbnail.
-    'q' parameter allows dynamic quality adjustment from the UI.
-    """
+    """Serves WebP thumbnail with dynamic quality."""
     if not os.path.exists(path): return Response(status_code=404)
     img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, q, size)
     return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
@@ -72,7 +69,6 @@ async def get_thumbnail(path: str, size: int = 400, q: int = 50):
 @app.get('/full_res')
 async def get_full_res(path: str):
     if not os.path.exists(path): return Response(status_code=404)
-    # Full res always uses high quality (90)
     img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, 90, None)
     return Response(content=img_bytes, media_type="image/webp")
 
@@ -83,10 +79,8 @@ async def get_full_res(path: str):
 def load_images():
     if os.path.exists(state.source_dir):
         state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
-        # Safety check for page bounds
         total_pages = math.ceil(len(state.all_images) / state.page_size)
         if state.page >= total_pages: state.page = 0
-        
         refresh_staged_info()
         refresh_ui()
     else:
@@ -104,16 +98,14 @@ def refresh_staged_info():
             
     # 2. Update Sidebar Index Map
     state.index_map.clear()
-    
-    # Check Staging
+    # Staging
     for orig_path, info in state.staged_data.items():
         if info['cat'] == state.active_cat:
             try:
                 num = int(info['name'].rsplit('_', 1)[1].split('.')[0])
                 state.index_map[num] = orig_path 
             except: pass
-            
-    # Check Disk
+    # Disk
     cat_path = os.path.join(state.output_dir, state.active_cat)
     if os.path.exists(cat_path):
         for f in os.listdir(cat_path):
@@ -136,7 +128,6 @@ def action_tag(img_path, manual_idx=None):
     ext = os.path.splitext(img_path)[1]
     name = f"{state.active_cat}_{idx:03d}{ext}"
     
-    # Conflict Check
     final_path = os.path.join(state.output_dir, state.active_cat, name)
     staged_names = {v['name'] for v in state.staged_data.values() if v['cat'] == state.active_cat}
     
@@ -145,17 +136,13 @@ def action_tag(img_path, manual_idx=None):
         name = f"{state.active_cat}_{idx:03d}_{len(staged_names)+1}{ext}"
 
     SorterEngine.stage_image(img_path, state.active_cat, name)
-    
     if manual_idx is None or manual_idx == state.next_index:
         state.next_index = idx + 1
-    
-    refresh_staged_info()
-    refresh_ui()
+    refresh_staged_info(); refresh_ui()
 
 def action_untag(img_path):
     SorterEngine.clear_staged_item(img_path)
-    refresh_staged_info()
-    refresh_ui()
+    refresh_staged_info(); refresh_ui()
 
 def action_delete(img_path):
     SorterEngine.delete_to_trash(img_path)
@@ -197,15 +184,13 @@ def render_sidebar():
             for i in range(1, 26):
                 is_used = i in state.index_map
                 color = 'green' if is_used else 'grey-9'
-                
                 def click_grid(num=i, used=is_used):
                     state.next_index = num
                     if used: open_zoom_dialog(state.index_map[num], f"{state.active_cat} #{num}")
                     render_sidebar()
-
                 ui.button(str(i), on_click=click_grid).props(f'color={color} size=sm flat').classes('w-full border border-gray-800')
         
-        # Category Selector
+        # Category Select
         categories = SorterEngine.get_categories() or ["Default"]
         if state.active_cat not in categories: state.active_cat = categories[0]
 
@@ -236,7 +221,6 @@ def render_sidebar():
 def render_gallery():
     grid_container.clear()
     batch = get_current_batch()
-    # Dynamic thumbnail sizing
     thumb_size = int(1800 / state.grid_cols)
     
     with grid_container:
@@ -244,7 +228,6 @@ def render_gallery():
             for img_path in batch:
                 is_staged = img_path in state.staged_data
                 
-                # Card Container
                 with ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow'):
                     # Header
                     with ui.row().classes('w-full justify-between no-wrap mb-1'):
@@ -254,21 +237,20 @@ def render_gallery():
                             ui.button(icon='delete', on_click=lambda p=img_path: action_delete(p)).props('flat size=sm dense color=red')
 
                     # --- FIXED IMAGE RENDERING ---
-                    # Changed 'object-cover' to 'object-contain'
-                    # Added 'bg-black' so the empty space around non-square images looks clean
+                    # 1. Increased height to h-64 (256px) for better visibility
+                    # 2. Changed object-cover to object-contain (NO CROPPING)
+                    # 3. Added bg-black to fill empty space nicely
                     ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
-                        .classes('w-full h-48 object-contain bg-black rounded') \
+                        .classes('w-full h-64 object-contain bg-black rounded') \
                         .props('no-spinner')
                     
                     # Actions
                     if is_staged:
                         info = state.staged_data[img_path]
-                        try:
-                            num = info['name'].rsplit('_', 1)[1].split('.')[0]
-                            label = f"Untag (#{num})"
-                        except: label = "Untag"
+                        try: num = info['name'].rsplit('_', 1)[1].split('.')[0]
+                        except: num = "?"
                         ui.label(f"🏷️ {info['cat']}").classes('text-center text-green-400 text-xs py-1 w-full')
-                        ui.button(label, on_click=lambda p=img_path: action_untag(p)).props('flat color=grey-5 dense').classes('w-full')
+                        ui.button(f"Untag (#{num})", on_click=lambda p=img_path: action_untag(p)).props('flat color=grey-5 dense').classes('w-full')
                     else:
                         with ui.row().classes('w-full no-wrap mt-2 gap-1'):
                             local_idx = ui.number(value=state.next_index, precision=0).props('dense dark outlined').classes('w-1/3')
@@ -283,10 +265,7 @@ def render_pagination():
 
     with pagination_container:
         # Slider
-        def on_slide(e):
-            state.page = int(e.value)
-            refresh_ui()
-        ui.slider(min=0, max=total_pages-1, value=state.page, on_change=on_slide).classes('w-1/2 mb-2').props('color=green')
+        ui.slider(min=0, max=total_pages-1, value=state.page, on_change=lambda e: set_page(int(e.value))).classes('w-1/2 mb-2').props('color=green')
 
         # Buttons
         with ui.row().classes('items-center gap-2'):
@@ -302,13 +281,10 @@ def render_pagination():
             ui.button('▶', on_click=lambda: set_page(state.page + 1)).props('flat color=white').bind_visibility_from(state, 'page', backward=lambda x: x < total_pages - 1)
 
 def set_page(p):
-    state.page = p
-    refresh_ui()
+    state.page = p; refresh_ui()
 
 def refresh_ui():
-    render_sidebar()
-    render_pagination()
-    render_gallery()
+    render_sidebar(); render_pagination(); render_gallery()
 
 def handle_key(e):
     if not e.action.keydown: return
@@ -328,9 +304,7 @@ with ui.header().classes('items-center bg-slate-900 text-white border-b border-g
         # Profile Select
         profile_names = list(state.profiles.keys())
         def change_profile(e):
-            state.profile_name = e.value
-            state.load_active_profile()
-            load_images()
+            state.profile_name = e.value; state.load_active_profile(); load_images()
         ui.select(profile_names, value=state.profile_name, on_change=change_profile).props('dark dense options-dense borderless').classes('w-32')
         
         # Paths
@@ -341,18 +315,14 @@ with ui.header().classes('items-center bg-slate-900 text-white border-b border-g
         ui.button(icon='save', on_click=state.save_current_profile).props('flat round color=white')
         ui.button('LOAD', on_click=load_images).props('color=green flat').classes('font-bold border border-green-700')
         
-        # VIEW SETTINGS MENU (New)
+        # View Menu
         with ui.button(icon='tune', color='white').props('flat round'):
             with ui.menu().classes('bg-gray-800 text-white p-4'):
                 ui.label('VIEW SETTINGS').classes('text-xs font-bold mb-2')
-                
                 ui.label('Grid Columns:')
-                def set_cols(v): state.grid_cols=v; refresh_ui()
-                ui.slider(min=2, max=8, step=1, value=state.grid_cols, on_change=lambda e: set_cols(e.value)).props('color=green')
-                
+                ui.slider(min=2, max=8, step=1, value=state.grid_cols, on_change=lambda e: (setattr(state, 'grid_cols', e.value), refresh_ui())).props('color=green')
                 ui.label('Preview Quality:')
-                def set_qual(v): state.preview_quality=v; refresh_ui()
-                ui.slider(min=10, max=100, step=10, value=state.preview_quality, on_change=lambda e: set_qual(e.value)).props('color=green label-always')
+                ui.slider(min=10, max=100, step=10, value=state.preview_quality, on_change=lambda e: (setattr(state, 'preview_quality', e.value), refresh_ui())).props('color=green label-always')
 
         ui.switch('Dark', value=True, on_change=lambda e: ui.dark_mode().set_value(e.value)).props('color=green')
 
