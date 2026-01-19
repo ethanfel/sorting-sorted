@@ -227,7 +227,7 @@ class SorterEngine:
         # FIXED: Added "marked": r[3] to the dictionary
         return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
         
-   staticmethod
+    @staticmethod
     def commit_global(output_root, cleanup_mode, operation="Move", source_root=None):
         """Commits ALL staged files (Global Apply)."""
         data = SorterEngine.get_staged_data()
