@@ -221,7 +221,8 @@ def render_sidebar():
 def render_gallery():
     grid_container.clear()
     batch = get_current_batch()
-    thumb_size = int(1800 / state.grid_cols)
+    # High resolution for grid to allow scaling
+    thumb_size = 600 
     
     with grid_container:
         with ui.grid(columns=state.grid_cols).classes('w-full gap-3'):
@@ -237,11 +238,11 @@ def render_gallery():
                             ui.button(icon='delete', on_click=lambda p=img_path: action_delete(p)).props('flat size=sm dense color=red')
 
                     # --- FIXED IMAGE RENDERING ---
-                    # 1. Increased height to h-64 (256px) for better visibility
-                    # 2. Changed object-cover to object-contain (NO CROPPING)
-                    # 3. Added bg-black to fill empty space nicely
+                    # aspect-[4/3]: Height scales with width.
+                    # object-contain: Shows FULL image (no crop), adds black bars if needed.
                     ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
-                        .classes('w-full h-64 object-contain bg-black rounded') \
+                        .classes('w-full aspect-[4/3] object-contain bg-black rounded') \
+                        .style('aspect-ratio: 4/3') \
                         .props('no-spinner')
                     
                     # Actions
