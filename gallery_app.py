@@ -221,8 +221,7 @@ def render_sidebar():
 def render_gallery():
     grid_container.clear()
     batch = get_current_batch()
-    # High resolution for grid to allow scaling
-    thumb_size = 600 
+    thumb_size = 800 # High res for crisp scaling
     
     with grid_container:
         with ui.grid(columns=state.grid_cols).classes('w-full gap-3'):
@@ -237,13 +236,12 @@ def render_gallery():
                             ui.button(icon='zoom_in', on_click=lambda p=img_path: open_zoom_dialog(p)).props('flat size=sm dense color=white')
                             ui.button(icon='delete', on_click=lambda p=img_path: action_delete(p)).props('flat size=sm dense color=red')
 
-                    # --- FIXED IMAGE RENDERING ---
-                    # aspect-[4/3]: Height scales with width.
-                    # object-contain: Shows FULL image (no crop), adds black bars if needed.
+                    # --- IMAGE RENDERING FIX ---
+                    # 1. w-full h-64: Forces the black box to be exactly 256px tall and full column width.
+                    # 2. fit=contain: PROPS are key here. This tells Quasar/HTML to fit the whole image INSIDE that box.
                     ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
-                        .classes('w-full aspect-[4/3] object-contain bg-black rounded') \
-                        .style('aspect-ratio: 4/3') \
-                        .props('no-spinner')
+                        .classes('w-full h-64 bg-black rounded') \
+                        .props('fit=contain no-spinner')
                     
                     # Actions
                     if is_staged:
