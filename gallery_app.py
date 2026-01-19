@@ -187,7 +187,7 @@ def render_sidebar():
             for i in range(1, 26):
                 is_used = i in state.index_map
                 # NiceGUI allows dynamic coloring easily
-                color = 'green' if is_used else 'grey-3'
+                color = 'green' if is_used else 'grey-8'
                 
                 # We use a closure for the callback
                 ui.button(str(i), on_click=lambda i=i: set_index(i)) \
@@ -310,25 +310,39 @@ def handle_key(e):
 # 6. MAIN LAYOUT
 # ==========================================
 
-# 1. HEADER (Fixed at top)
-with ui.header().classes('bg-white text-black border-b border-gray-200').style('height: 60px'):
-    with ui.row().classes('w-full items-center justify-between'):
-        ui.label('🖼️ NiceGUI Gallery Sorter').classes('text-xl font-bold')
+# 1. HEADER (Adaptive Color + Dark Mode Toggle)
+# We removed 'bg-white' so it respects dark mode.
+with ui.header().classes('items-center justify-between bg-slate-900 text-white').style('height: 70px'):
+    
+    with ui.row().classes('items-center gap-2'):
+        ui.label('🖼️ Sorter').classes('text-xl font-bold mr-4')
         
-        with ui.row().classes('gap-4'):
-            # Bind input fields to state
-            ui.input('Source').bind_value(state, 'source_dir').classes('w-64')
-            ui.input('Output').bind_value(state, 'output_dir').classes('w-64')
-            ui.button('Load', on_click=load_images)
+        # WIDER INPUTS (w-96 is approx 400px)
+        # We use 'props' to set specific dark mode styling for inputs
+        ui.input('Source').bind_value(state, 'source_dir') \
+            .classes('w-96').props('dark dense outlined')
+            
+        ui.input('Output').bind_value(state, 'output_dir') \
+            .classes('w-96').props('dark dense outlined')
+            
+        ui.button('Load', on_click=load_images).props('dense flat color=white')
 
-# 2. LEFT SIDEBAR (Fixed Drawer)
-# value=True means open by default
-with ui.left_drawer(value=True).classes('bg-gray-50 p-4 border-r border-gray-200').props('width=300') as drawer:
+    # Right side: Dark Mode Toggle
+    with ui.row().classes('items-center'):
+        # Toggle switch for Dark Mode
+        dark = ui.dark_mode()
+        dark.enable() # Enable by default
+        ui.switch('Dark', value=True, on_change=lambda e: dark.set_value(e.value)) \
+            .props('color=green')
+
+# 2. LEFT SIDEBAR
+with ui.left_drawer(value=True).classes('bg-gray-900 p-4 border-r border-gray-700').props('width=320') as drawer:
     sidebar_container = ui.column().classes('w-full')
 
 # 3. MAIN CONTENT
-# We just place this in a column; NiceGUI handles the "main" area automatically
-with ui.column().classes('w-full p-4'):
+# bg-gray-800 ensures the main background is dark
+with ui.column().classes('w-full p-4 bg-gray-800 min-h-screen text-white'):
+    
     # Top Pagination
     pagination_container = ui.column().classes('w-full items-center mb-4')
     
@@ -336,9 +350,9 @@ with ui.column().classes('w-full p-4'):
     grid_container = ui.column().classes('w-full')
     
     # Batch Actions Footer
-    ui.separator().classes('my-8')
+    ui.separator().classes('my-8 bg-gray-600')
     with ui.row().classes('w-full justify-center gap-4'):
-        ui.button('APPLY PAGE', on_click=lambda: action_apply_page()).props('outline')
+        ui.button('APPLY PAGE', on_click=lambda: action_apply_page()).props('outline color=white')
         ui.button('APPLY GLOBAL', color='red', on_click=lambda: ui.notify("Global Apply not implemented in demo")).classes('font-bold')
 
 # Initialize Data
@@ -351,5 +365,4 @@ ui.keyboard(on_key=handle_key)
 refresh_ui()
 
 # Start App
-# Note: reload=False is safer for production/docker
 ui.run(title="Gallery Sorter", host="0.0.0.0", port=8080, reload=False)
