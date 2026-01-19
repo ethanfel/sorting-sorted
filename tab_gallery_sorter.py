@@ -414,11 +414,18 @@ def render_pagination_carousel(key_suffix, total_pages, all_images, page_size):
                   on_click=cb_change_page, args=(1,), 
                   key=f"next_{key_suffix}", use_container_width=True)
 
-    st.divider()
-    render_pagination_carousel("top", total_pages, all_images, page_size)
-    render_gallery_grid(current_batch, quality, grid_cols, path_o)
-    st.divider()
-    render_pagination_carousel("bot", total_pages, all_images, page_size)
+    # --- RENDER PAGE ---
     st.divider()
     
-    render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
+    # Replaces: nav_controls("top")
+    render_pagination_carousel("top", total_pages, all_images, page_size)
+    
+    # ... render_gallery_grid call ...
+    render_gallery_grid(current_batch, quality, grid_cols, path_o)
+    
+    st.divider()
+    
+    # Replaces: nav_controls("bottom")
+    render_pagination_carousel("bot", total_pages, all_images, page_size)
+    
+    st.divider()
