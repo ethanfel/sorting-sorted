@@ -334,18 +334,91 @@ def render(quality, profile_name):
     end_idx = start_idx + page_size
     current_batch = all_images[start_idx:end_idx]
 
-    def nav_controls(key_suffix):
-        c1, c2, c3, c4 = st.columns([1.5, 1, 0.5, 1.5], vertical_alignment="center")
-        c1.button("⬅️ Prev", disabled=(st.session_state.t5_page == 0), on_click=cb_change_page, args=(-1,), key=f"p_{key_suffix}", use_container_width=True)
-        c2.number_input("Page", min_value=1, max_value=total_pages, value=st.session_state.t5_page + 1, step=1, label_visibility="collapsed", key=f"jump_{key_suffix}", on_change=cb_jump_page, args=(f"jump_{key_suffix}",))
-        c3.markdown(f"<div style='text-align: left; font-weight: bold;'>/ {total_pages}</div>", unsafe_allow_html=True)
-        c4.button("Next ➡️", disabled=(st.session_state.t5_page >= total_pages - 1), on_click=cb_change_page, args=(1,), key=f"n_{key_suffix}", use_container_width=True)
+    # Place this helper inside tab_gallery_sorter.py (or keep it if you have the old one)
+def cb_set_page(page_idx):
+    st.session_state.t5_page = page_idx
+
+def render_pagination_carousel(key_suffix, total_pages, all_images, page_size):
+    """
+    Renders a 'Carousel' style pagination with a slider for fast seeking
+    and buttons for precise selection with status indicators.
+    """
+    current_page = st.session_state.t5_page
+    
+    # 1. CALCULATE TAGGED PAGES (For the Green Indicator)
+    # We do this once per render
+    tagged_pages_set = SorterEngine.get_tagged_page_indices(all_images, page_size)
+    
+    # --- A. RAPID SEEKER SLIDER (Debounced) ---
+    # Streamlit sliders only rerun the script on mouse release. 
+    # This acts as your "wait a bit" logic.
+    new_page = st.slider(
+        "Rapid Navigation", 
+        0, total_pages - 1, current_page, 
+        key=f"slider_{key_suffix}",
+        label_visibility="collapsed"
+    )
+    
+    # If slider moved, update state and rerun
+    if new_page != current_page:
+        st.session_state.t5_page = new_page
+        st.rerun()
+
+    # --- B. BUTTON CAROUSEL ---
+    # We want to show a window of pages: [Prev] .. [p-2] [p-1] [P] [p+1] [p+2] .. [Next]
+    
+    # Define window size (how many numbered buttons to show)
+    window_radius = 2 
+    start_p = max(0, current_page - window_radius)
+    end_p = min(total_pages, current_page + window_radius + 1)
+    
+    # Adjust window if we are near the start or end to keep number of buttons constant
+    if current_page < window_radius:
+        end_p = min(total_pages, 5)
+    elif current_page > total_pages - window_radius - 1:
+        start_p = max(0, total_pages - 5)
+
+    # Layout: Prev + (Window Buttons) + Next
+    # Total columns = (end_p - start_p) + 2 buttons
+    num_page_buttons = end_p - start_p
+    cols = st.columns([1] + [1] * num_page_buttons + [1])
+    
+    # 1. PREV BUTTON
+    with cols[0]:
+        st.button("◀", disabled=(current_page == 0), 
+                  on_click=cb_change_page, args=(-1,), 
+                  key=f"prev_{key_suffix}", use_container_width=True)
+
+    # 2. PAGE NUMBER BUTTONS
+    for i, p_idx in enumerate(range(start_p, end_p)):
+        col_idx = i + 1
+        with cols[col_idx]:
+            # Label Logic: Add 🟢 if tagged
+            label = str(p_idx + 1)
+            if p_idx in tagged_pages_set:
+                label += " 🟢"
+            
+            # Highlight current page using type="primary"
+            is_active = (p_idx == current_page)
+            btn_type = "primary" if is_active else "secondary"
+            
+            st.button(label, 
+                      type=btn_type,
+                      key=f"btn_p{p_idx}_{key_suffix}", 
+                      use_container_width=True,
+                      on_click=cb_set_page, args=(p_idx,))
+
+    # 3. NEXT BUTTON
+    with cols[-1]:
+        st.button("▶", disabled=(current_page >= total_pages - 1), 
+                  on_click=cb_change_page, args=(1,), 
+                  key=f"next_{key_suffix}", use_container_width=True)
 
     st.divider()
-    nav_controls("top")
+    render_pagination_carousel("top", total_pages, all_images, page_size)
     render_gallery_grid(current_batch, quality, grid_cols, path_o)
     st.divider()
-    nav_controls("bottom")
+    render_pagination_carousel("bot", total_pages, all_images, page_size)
     st.divider()
     
     render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
