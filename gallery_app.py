@@ -335,4 +335,9 @@ ui.keyboard(on_key=handle_key)
 refresh_ui()
 
 # Start App
-ui.run(title="Gallery Sorter", port=8080, reload=True)
+ui.run(
+    title="Gallery Sorter", 
+    host="0.0.0.0",   # <--- REQUIRED for Docker
+    port=8080,        # <--- NiceGUI default
+    reload=False      # Set True only for development
+)
