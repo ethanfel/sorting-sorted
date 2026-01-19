@@ -298,35 +298,40 @@ def handle_key(e):
 # ==========================================
 # 6. MAIN LAYOUT
 # ==========================================
-# Initialize Data
-load_images()
 
-with ui.header().classes('bg-white text-black border-b border-gray-200'):
+# 1. HEADER (Fixed at top)
+with ui.header().classes('bg-white text-black border-b border-gray-200').style('height: 60px'):
     with ui.row().classes('w-full items-center justify-between'):
         ui.label('🖼️ NiceGUI Gallery Sorter').classes('text-xl font-bold')
+        
         with ui.row().classes('gap-4'):
-            ui.input('Source', value=state.source_dir).bind_value(state, 'source_dir')
-            ui.input('Output', value=state.output_dir).bind_value(state, 'output_dir')
+            # Bind input fields to state
+            ui.input('Source').bind_value(state, 'source_dir').classes('w-64')
+            ui.input('Output').bind_value(state, 'output_dir').classes('w-64')
             ui.button('Load', on_click=load_images)
 
-with ui.layout():
-    # Left Sidebar
-    with ui.left_drawer(fixed=True, value=True).classes('bg-gray-50 p-4') as drawer:
-        sidebar_container = ui.column().classes('w-full')
+# 2. LEFT SIDEBAR (Fixed Drawer)
+# value=True means open by default
+with ui.left_drawer(value=True).classes('bg-gray-50 p-4 border-r border-gray-200').props('width=300') as drawer:
+    sidebar_container = ui.column().classes('w-full')
 
-    # Main Content
-    with ui.column().classes('w-full p-4'):
-        # Top Pagination
-        pagination_container = ui.column().classes('w-full items-center mb-4')
-        
-        # Gallery Grid
-        grid_container = ui.column().classes('w-full')
-        
-        # Batch Actions Footer
-        ui.separator().classes('my-8')
-        with ui.row().classes('w-full justify-center gap-4'):
-            ui.button('APPLY PAGE', on_click=lambda: action_apply_page()).props('outline')
-            ui.button('APPLY GLOBAL', color='red', on_click=lambda: ui.notify("Global not impl in demo")).classes('font-bold')
+# 3. MAIN CONTENT
+# We just place this in a column; NiceGUI handles the "main" area automatically
+with ui.column().classes('w-full p-4'):
+    # Top Pagination
+    pagination_container = ui.column().classes('w-full items-center mb-4')
+    
+    # Gallery Grid
+    grid_container = ui.column().classes('w-full')
+    
+    # Batch Actions Footer
+    ui.separator().classes('my-8')
+    with ui.row().classes('w-full justify-center gap-4'):
+        ui.button('APPLY PAGE', on_click=lambda: action_apply_page()).props('outline')
+        ui.button('APPLY GLOBAL', color='red', on_click=lambda: ui.notify("Global Apply not implemented in demo")).classes('font-bold')
+
+# Initialize Data
+load_images()
 
 # Bind Keys
 ui.keyboard(on_key=handle_key)
@@ -335,9 +340,5 @@ ui.keyboard(on_key=handle_key)
 refresh_ui()
 
 # Start App
-ui.run(
-    title="Gallery Sorter", 
-    host="0.0.0.0",   # <--- REQUIRED for Docker
-    port=8080,        # <--- NiceGUI default
-    reload=False      # Set True only for development
-)
+# Note: reload=False is safer for production/docker
+ui.run(title="Gallery Sorter", host="0.0.0.0", port=8080, reload=False)
