@@ -423,41 +423,50 @@ def render_batch_actions(current_batch, path_o, page_num, path_s):
 def render(quality, profile_name):
     st.subheader("🖼️ Gallery Staging Sorter")
     
-    # Init State
+    # --- 1. INITIALIZE STATE ---
     if 't5_file_id' not in st.session_state: st.session_state.t5_file_id = 0
     if 't5_page' not in st.session_state: st.session_state.t5_page = 0
     
+    # --- 2. LOAD PROFILES & PATHS ---
     profiles = SorterEngine.load_profiles()
     p_data = profiles.get(profile_name, {})
     c1, c2 = st.columns(2)
     path_s = c1.text_input("Source Folder", value=p_data.get("tab5_source", "/storage"), key="t5_s")
     path_o = c2.text_input("Output Folder", value=p_data.get("tab5_out", "/storage"), key="t5_o")
     
+    # Save if changed
     if path_s != p_data.get("tab5_source") or path_o != p_data.get("tab5_out"):
         if st.button("💾 Save Settings"):
             SorterEngine.save_tab_paths(profile_name, t5_s=path_s, t5_o=path_o)
             trigger_refresh()
             st.rerun()
 
-    if not os.path.exists(path_s): return
+    if not os.path.exists(path_s): 
+        st.warning("⚠️ Source path does not exist.")
+        return
 
+    # --- 3. RENDER SIDEBAR ---
     with st.sidebar:
+        # We pass path_o to show the Green Dots on the number grid
         render_sidebar_content(path_o)
 
+    # --- 4. VIEW SETTINGS ---
     with st.expander("👀 View Settings"):
         c_v1, c_v2 = st.columns(2)
         page_size = c_v1.slider("Images per Page", 12, 100, 24, 4)
         grid_cols = c_v2.slider("Grid Columns", 2, 8, 4)
 
-    # Load Files (Cached)
+    # --- 5. LOAD FILES (Cached) ---
     all_images = get_cached_images(path_s, st.session_state.t5_file_id)
     if not all_images:
         st.info("No images found.")
         return
 
-   # Pagination Math
+    # --- 6. PAGINATION MATH ---
     total_items = len(all_images)
     total_pages = math.ceil(total_items / page_size)
+    
+    # Safety bounds
     if st.session_state.t5_page >= total_pages: st.session_state.t5_page = max(0, total_pages - 1)
     if st.session_state.t5_page < 0: st.session_state.t5_page = 0
     
@@ -465,26 +474,27 @@ def render(quality, profile_name):
     end_idx = start_idx + page_size
     current_batch = all_images[start_idx:end_idx]
 
-    # --- 1. CALCULATE GREEN DOTS ONCE (Optimized) ---
-    staged_data = SorterEngine.get_staged_data()
-    # We pass 'frozenset' so the cache works efficiently
-    green_dots_set = get_cached_green_dots(all_images, page_size, frozenset(staged_data.keys()))
+    # --- 7. CALCULATE GREEN DOTS (Optimized/Cached) ---
+    staged = SorterEngine.get_staged_data()
+    # Frozenset is required for caching to work on a dictionary keyset
+    green_dots_set = get_cached_green_dots(all_images, page_size, frozenset(staged.keys()))
 
-    # --- 2. RENDER UI ---
+    # --- 8. RENDER UI COMPONENTS ---
+    
     st.divider()
     
-    # CORRECTED CALL: Pass 'current_page' and 'green_dots_set'
+    # TOP PAGINATION
     render_pagination_carousel("top", total_pages, st.session_state.t5_page, green_dots_set)
     
+    # GALLERY GRID
     render_gallery_grid(current_batch, quality, grid_cols, path_o)
     
     st.divider()
     
-    # CORRECTED CALL
+    # BOTTOM PAGINATION
     render_pagination_carousel("bot", total_pages, st.session_state.t5_page, green_dots_set)
     
     st.divider()
-    render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
     
-    st.divider()
+    # BATCH ACTIONS (Only called ONCE here)
     render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
