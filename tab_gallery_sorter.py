@@ -65,13 +65,7 @@ def cb_set_page(page_idx):
     st.session_state.t5_page = page_idx
 
 def cb_slider_change(key):
-    """
-    Updates the page number from the slider.
-    Adjusts for 1-based display (Slider=1 -> Page=0).
-    """
-    # Get the value from the widget
     val = st.session_state[key]
-    # Update the global page index (0-based)
     st.session_state.t5_page = val - 1
 
 
@@ -112,6 +106,22 @@ def view_tag_preview(img_path, title):
     else:
         st.error(f"Could not load image: {img_path}")
 
+@st.cache_data(show_spinner=False)
+def get_cached_green_dots(all_images, page_size, staged_keys):
+    """
+    Calculates which pages have tags. 
+    Cached based on the specific keys in the staging area.
+    """
+    # We reconstruct the set of staged keys from the frozenset
+    staged_set = set(staged_keys)
+    tagged_pages = set()
+    
+    # Efficient O(N) scan ONLY when tagging changes
+    for idx, img_path in enumerate(all_images):
+        if img_path in staged_set:
+            tagged_pages.add(idx // page_size)
+            
+    return tagged_pages
 # ==========================================
 # 3. FRAGMENTS
 # ==========================================
@@ -239,67 +249,58 @@ def render_sidebar_content(path_o):
 
 # NOTE: Do NOT use @st.fragment here. 
 # Navigation controls must trigger a full app rerun to load the new batch of images.
-def render_pagination_carousel(key_suffix, total_pages, all_images, page_size):
+# CHANGED: Added 'tagged_pages_set' to arguments
+def render_pagination_carousel(key_suffix, total_pages, current_page, tagged_pages_set):
     """
-    Renders pagination with 1-based indexing and smooth callbacks.
+    Renders pagination. No calculation here—just pure UI rendering.
     """
-    # Safety Check
-    if total_pages <= 1: 
-        return
+    if total_pages <= 1: return
 
-    current_page = st.session_state.t5_page
-    
-    # 1. Get Tagged Pages (for the Green Dot)
-    tagged_pages_set = SorterEngine.get_tagged_page_indices(all_images, page_size)
-    
-    # 2. Rapid Seeker Slider (1-BASED)
-    # We set min=1 and max=total_pages so it looks human-readable.
-    # The callback 'cb_slider_change' handles the -1 conversion.
+    # 1. Rapid Seeker Slider (1-BASED)
     st.slider(
         "Rapid Navigation", 
-        min_value=1, 
-        max_value=total_pages, 
-        value=current_page + 1, 
-        step=1,
-        key=f"slider_{key_suffix}",
-        label_visibility="collapsed",
+        min_value=1, max_value=total_pages, value=current_page + 1, step=1,
+        key=f"slider_{key_suffix}", label_visibility="collapsed",
         on_change=cb_slider_change, args=(f"slider_{key_suffix}",)
     )
 
-    # 3. Button Window Logic
+    # 2. Window Logic (Calculate range of buttons to show)
     window_radius = 2 
     start_p = max(0, current_page - window_radius)
     end_p = min(total_pages, current_page + window_radius + 1)
     
-    # Keep the window width constant near edges
-    if current_page < window_radius:
+    # Adjust window near edges to keep width constant
+    if current_page < window_radius: 
         end_p = min(total_pages, 5)
-    elif current_page > total_pages - window_radius - 1:
+    elif current_page > total_pages - window_radius - 1: 
         start_p = max(0, total_pages - 5)
 
     num_page_buttons = end_p - start_p
-    if num_page_buttons < 1: return
+    # Safety check if page count is small
+    if num_page_buttons < 1: 
+        start_p = 0
+        end_p = total_pages
+        num_page_buttons = total_pages
 
-    # 4. Render Buttons
+    # 3. Render Buttons
+    # We create columns: [Prev] + [1] [2] [3] ... + [Next]
     cols = st.columns([1] + [1] * num_page_buttons + [1])
     
-    # PREV
+    # --- PREV BUTTON ---
     with cols[0]:
         st.button("◀", disabled=(current_page == 0), 
                   on_click=cb_change_page, args=(-1,), 
                   key=f"prev_{key_suffix}", use_container_width=True)
     
-    # NUMBERED BUTTONS (1-BASED LABELS)
+    # --- NUMBERED BUTTONS ---
     for i, p_idx in enumerate(range(start_p, end_p)):
         with cols[i + 1]:
-            # Human readable label (Page 0 -> "1")
             label = str(p_idx + 1)
-            
-            # Green Dot Indicator
+            # Add Green Dot if this page has tagged items
             if p_idx in tagged_pages_set: 
                 label += " 🟢"
             
-            # Highlight Active Page
+            # Highlight Current Page
             btn_type = "primary" if p_idx == current_page else "secondary"
             
             st.button(label, type=btn_type, 
@@ -307,7 +308,7 @@ def render_pagination_carousel(key_suffix, total_pages, all_images, page_size):
                       use_container_width=True, 
                       on_click=cb_set_page, args=(p_idx,))
 
-    # NEXT
+    # --- NEXT BUTTON ---
     with cols[-1]:
         st.button("▶", disabled=(current_page >= total_pages - 1), 
                   on_click=cb_change_page, args=(1,), 
@@ -454,7 +455,7 @@ def render(quality, profile_name):
         st.info("No images found.")
         return
 
-    # Pagination Math
+   # Pagination Math
     total_items = len(all_images)
     total_pages = math.ceil(total_items / page_size)
     if st.session_state.t5_page >= total_pages: st.session_state.t5_page = max(0, total_pages - 1)
@@ -464,14 +465,26 @@ def render(quality, profile_name):
     end_idx = start_idx + page_size
     current_batch = all_images[start_idx:end_idx]
 
-    # --- RENDER UI ---
+    # --- 1. CALCULATE GREEN DOTS ONCE (Optimized) ---
+    staged_data = SorterEngine.get_staged_data()
+    # We pass 'frozenset' so the cache works efficiently
+    green_dots_set = get_cached_green_dots(all_images, page_size, frozenset(staged_data.keys()))
+
+    # --- 2. RENDER UI ---
     st.divider()
-    render_pagination_carousel("top", total_pages, all_images, page_size)
+    
+    # CORRECTED CALL: Pass 'current_page' and 'green_dots_set'
+    render_pagination_carousel("top", total_pages, st.session_state.t5_page, green_dots_set)
     
     render_gallery_grid(current_batch, quality, grid_cols, path_o)
     
     st.divider()
-    render_pagination_carousel("bot", total_pages, all_images, page_size)
+    
+    # CORRECTED CALL
+    render_pagination_carousel("bot", total_pages, st.session_state.t5_page, green_dots_set)
+    
+    st.divider()
+    render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
     
     st.divider()
     render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
