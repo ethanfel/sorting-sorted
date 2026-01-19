@@ -23,16 +23,46 @@ def trigger_refresh():
     if 't5_file_id' not in st.session_state: st.session_state.t5_file_id = 0
     st.session_state.t5_file_id += 1
 
-def cb_tag_image(img_path, selected_cat):
+def cb_tag_image(img_path, selected_cat, index_val, path_o):
+    """
+    Tags image with manual number. 
+    Handles collisions by creating variants (e.g. _001_1) and warning the user.
+    """
     if selected_cat.startswith("---") or selected_cat == "":
         st.toast("⚠️ Select a valid category first!", icon="🚫")
         return
-    staged = SorterEngine.get_staged_data()
+
     ext = os.path.splitext(img_path)[1]
-    count = len([v for v in staged.values() if v['cat'] == selected_cat]) + 1
-    new_name = f"{selected_cat}_{count:03d}{ext}"
+    base_name = f"{selected_cat}_{index_val:03d}"
+    new_name = f"{base_name}{ext}"
+    
+    # --- COLLISION DETECTION ---
+    # 1. Check Staging DB
+    staged = SorterEngine.get_staged_data()
+    # Get all names currently staged for this category
+    staged_names = {v['name'] for v in staged.values() if v['cat'] == selected_cat}
+    
+    # 2. Check Hard Drive
+    dest_path = os.path.join(path_o, selected_cat, new_name)
+    
+    collision = False
+    suffix = 1
+    
+    # Loop until we find a free name
+    while new_name in staged_names or os.path.exists(dest_path):
+        collision = True
+        new_name = f"{base_name}_{suffix}{ext}"
+        dest_path = os.path.join(path_o, selected_cat, new_name)
+        suffix += 1
+    
+    # --- SAVE ---
     SorterEngine.stage_image(img_path, selected_cat, new_name)
-    # Note: Tagging does NOT need a file re-scan, just a grid refresh.
+    
+    if collision:
+        st.toast(f"⚠️ Conflict! Saved as variant: {new_name}", icon="🔀")
+    
+    # REMOVED: st.session_state.t5_next_index += 1
+    # The numbers in the input boxes will now stay static.
 
 def cb_untag_image(img_path):
     SorterEngine.clear_staged_item(img_path)
@@ -112,19 +142,62 @@ def render_sidebar_content():
         else:
             st.info("Select a valid category to edit.")
 
+@st.dialog("🔍 High-Res Inspection", width="large")
+def view_high_res(img_path):
+    """
+    Opens a modal and loads the ORIGINAL size image on demand.
+    We still compress to WebP (q=90) to ensure it sends fast, 
+    but we do NOT resize the dimensions.
+    """
+    # Load with target_size=None to keep original dimensions
+    # Quality=90 for high fidelity
+    img_data = SorterEngine.compress_for_web(img_path, quality=90, target_size=None)
+    
+    if img_data:
+        st.image(img_data, use_container_width=True)
+        st.caption(f"Filename: {os.path.basename(img_path)}")
+    else:
+        st.error("Could not load full resolution image.")
 
 # ... (Gallery Grid code remains exactly the same) ...
+# --- UPDATED CACHE FUNCTION ---
+@st.cache_data(show_spinner=False, max_entries=2000)
+def get_cached_thumbnail(path, quality, target_size, mtime):
+    # We pass the dynamic target_size here
+    return SorterEngine.compress_for_web(path, quality, target_size)
+
+# --- UPDATED GALLERY FRAGMENT ---
 @st.fragment
-def render_gallery_grid(current_batch, quality, grid_cols):
+def render_gallery_grid(current_batch, quality, grid_cols, path_o): # <--- 1. Added path_o
     staged = SorterEngine.get_staged_data()
     history = SorterEngine.get_processed_log()
     selected_cat = st.session_state.get("t5_active_cat", "Default")
     tagging_disabled = selected_cat.startswith("---")
+    
+    # 2. Ensure global counter exists (default to 1)
+    if "t5_next_index" not in st.session_state: st.session_state.t5_next_index = 1
 
-    # --- NEW: LOAD ALL IMAGES IN PARALLEL ---
-    # This runs multithreaded and is much faster than the old loop
-    batch_cache = SorterEngine.load_batch_parallel(current_batch, quality)
+    # 3. Smart Resolution (Wide screen assumption)
+    target_size = int(2400 / grid_cols)
 
+    # 4. Parallel Load (16 threads for WebP)
+    import concurrent.futures
+    batch_cache = {}
+    
+    def fetch_one(p):
+        try:
+            mtime = os.path.getmtime(p)
+            return p, get_cached_thumbnail(p, quality, target_size, mtime)
+        except:
+            return p, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        future_to_path = {executor.submit(fetch_one, p): p for p in current_batch}
+        for future in concurrent.futures.as_completed(future_to_path):
+            p, data = future.result()
+            batch_cache[p] = data
+
+    # 5. Render Grid
     cols = st.columns(grid_cols)
     for idx, img_path in enumerate(current_batch):
         unique_key = f"frag_{os.path.basename(img_path)}"
@@ -133,50 +206,83 @@ def render_gallery_grid(current_batch, quality, grid_cols):
             is_processed = img_path in history
             
             with st.container(border=True):
-                c_head1, c_head2 = st.columns([5, 1])
-                c_head1.caption(os.path.basename(img_path)[:15])
-                c_head2.button("❌", key=f"del_{unique_key}", on_click=cb_delete_image, args=(img_path,))
+                # Header: [Name] [Zoom] [Delete]
+                c_name, c_zoom, c_del = st.columns([4, 1, 1])
+                c_name.caption(os.path.basename(img_path)[:10])
+                
+                if c_zoom.button("🔍", key=f"zoom_{unique_key}"):
+                    view_high_res(img_path)
+                    
+                c_del.button("❌", key=f"del_{unique_key}", on_click=cb_delete_image, args=(img_path,))
 
+                # Status Banners
                 if is_staged:
                     st.success(f"🏷️ {staged[img_path]['cat']}")
                 elif is_processed:
-                    st.info(f"✅ {history[img_path]['action']} -> {history[img_path]['cat']}")
+                    st.info(f"✅ {history[img_path]['action']}")
 
-                # --- CHANGED: USE PRE-LOADED DATA ---
+                # Image (Cached)
                 img_data = batch_cache.get(img_path)
                 if img_data: 
                     st.image(img_data, use_container_width=True)
 
+                # Action Area
                 if not is_staged:
-                    st.button("Tag", key=f"tag_{unique_key}", disabled=tagging_disabled, use_container_width=True,
-                              on_click=cb_tag_image, args=(img_path, selected_cat))
+                    # 6. Split Row: [Idx Input] [Tag Button]
+                    c_idx, c_tag = st.columns([1, 2], vertical_alignment="bottom")
+                    
+                    # Manual Override Box (Defaults to global session value)
+                    card_index = c_idx.number_input(
+                        "Idx", 
+                        min_value=1, step=1, 
+                        value=st.session_state.t5_next_index, 
+                        label_visibility="collapsed",
+                        key=f"idx_{unique_key}"
+                    )
+                    
+                    # Tag Button (Passes path_o for conflict check)
+                    c_tag.button(
+                        "Tag", 
+                        key=f"tag_{unique_key}", 
+                        disabled=tagging_disabled, 
+                        use_container_width=True,
+                        on_click=cb_tag_image, 
+                        # Passing card_index + path_o is vital here
+                        args=(img_path, selected_cat, card_index, path_o) 
+                    )
                 else:
                     st.button("Untag", key=f"untag_{unique_key}", use_container_width=True,
                               on_click=cb_untag_image, args=(img_path,))
-
 
 # ... (Batch Actions code remains exactly the same) ...
 @st.fragment
 def render_batch_actions(current_batch, path_o, page_num, path_s):
     st.write(f"### 🚀 Processing Actions")
     st.caption("Settings apply to both Page and Global actions.")
+    
     c_set1, c_set2 = st.columns(2)
-    op_mode = c_set1.radio("Tagged Files:", ["Move", "Copy"], horizontal=True, key="t5_op_mode")
+    
+    # CHANGED: "Copy" is now first, making it the default
+    op_mode = c_set1.radio("Tagged Files:", ["Copy", "Move"], horizontal=True, key="t5_op_mode")
+    
     cleanup = c_set2.radio("Untagged Files:", ["Keep", "Move to Unused", "Delete"], horizontal=True, key="t5_cleanup_mode")
+    
     st.divider()
+    
     c_btn1, c_btn2 = st.columns(2)
     
+    # BUTTON 1: APPLY PAGE
     if c_btn1.button(f"APPLY PAGE {page_num}", type="secondary", use_container_width=True,
                      on_click=cb_apply_batch, args=(current_batch, path_o, cleanup, op_mode)):
         st.toast(f"Page {page_num} Applied!")
         st.rerun()
 
+    # BUTTON 2: APPLY GLOBAL
     if c_btn2.button("APPLY ALL (GLOBAL)", type="primary", use_container_width=True,
                      help="Process ALL tagged files across all pages.",
                      on_click=cb_apply_global, args=(path_o, cleanup, op_mode, path_s)):
         st.toast("Global Apply Complete!")
         st.rerun()
-
 
 # ==========================================
 # 4. MAIN RENDERER
@@ -237,7 +343,7 @@ def render(quality, profile_name):
 
     st.divider()
     nav_controls("top")
-    render_gallery_grid(current_batch, quality, grid_cols)
+    render_gallery_grid(current_batch, quality, grid_cols, path_o)
     st.divider()
     nav_controls("bottom")
     st.divider()

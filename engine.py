@@ -253,8 +253,8 @@ class SorterEngine:
         return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
         
     @staticmethod
-    def commit_global(output_root, cleanup_mode, operation="Move", source_root=None):
-        """Commits ALL staged files (Global Apply)."""
+    def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None):
+        """Commits ALL staged files and fixes permissions."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
@@ -278,20 +278,26 @@ class SorterEngine:
                 else:
                     shutil.move(old_p, final_dst)
                 
+                # --- FIX PERMISSIONS ---
+                SorterEngine.fix_permissions(final_dst)
+                
                 # Log History
                 cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
                                (old_p, info['cat'], operation))
 
-        # 2. Global Cleanup (Optional)
-        # Only run cleanup if explicitly asked, as global cleanup is risky
+        # 2. Global Cleanup
         if cleanup_mode != "Keep" and source_root:
             all_imgs = SorterEngine.get_images(source_root, recursive=True)
             for img_p in all_imgs:
-                if img_p not in data: # Not currently staged
+                if img_p not in data:
                     if cleanup_mode == "Move to Unused":
                         unused_dir = os.path.join(source_root, "unused")
                         os.makedirs(unused_dir, exist_ok=True)
-                        shutil.move(img_p, os.path.join(unused_dir, os.path.basename(img_p)))
+                        dest_unused = os.path.join(unused_dir, os.path.basename(img_p))
+                        
+                        shutil.move(img_p, dest_unused)
+                        SorterEngine.fix_permissions(dest_unused)
+                        
                     elif cleanup_mode == "Delete": 
                         os.remove(img_p)
 
@@ -354,14 +360,29 @@ class SorterEngine:
         return t_dst, c_dst
 
     @staticmethod
-    def compress_for_web(path, quality):
-        """Compresses images for UI performance."""
+    def compress_for_web(path, quality, target_size=None):
+        """
+        Loads image, resizes smart, and saves as WebP.
+        """
         try:
             with Image.open(path) as img:
+                # 1. Convert to RGB (WebP handles RGBA, but RGB is safer for consistency)
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert("RGB")
+                
+                # 2. Smart Resize (Only if target_size is provided)
+                if target_size:
+                    # Only resize if the original is actually bigger
+                    if img.width > target_size or img.height > target_size:
+                        img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+                
+                # 3. Save as WebP
                 buf = BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=quality)
-                return buf
-        except: return None
+                # WebP is faster to decode in browser and smaller on disk
+                img.save(buf, format="WEBP", quality=quality)
+                return buf.getvalue()
+        except Exception: 
+            return None
 
     @staticmethod
     def revert_action(action):
@@ -384,8 +405,17 @@ class SorterEngine:
         return {r[0]: {"cat": r[1], "action": r[2]} for r in rows}
 
     @staticmethod
-    def commit_batch(file_list, output_root, cleanup_mode, operation="Move"):
-        """Commits specified files and LOGS them to history."""
+    def fix_permissions(path):
+        """Forces file to be fully accessible (rwxrwxrwx)."""
+        try:
+            # 0o777 gives Read, Write, and Execute access to Owner, Group, and Others.
+            os.chmod(path, 0o777)
+        except Exception:
+            pass # Ignore errors if OS doesn't support chmod (e.g. some Windows setups)
+
+    @staticmethod
+    def commit_batch(file_list, output_root, cleanup_mode, operation="Copy"):
+        """Commits files and fixes permissions."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
@@ -408,13 +438,16 @@ class SorterEngine:
                          final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
                          c += 1
                 
-                # Action
+                # Perform Action
                 if operation == "Copy":
                     shutil.copy2(file_path, final_dst)
                 else:
                     shutil.move(file_path, final_dst)
 
-                # Update DB: Remove from Staging, Add to History
+                # --- FIX PERMISSIONS ---
+                SorterEngine.fix_permissions(final_dst)
+
+                # Update DB
                 cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
                 cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
                                (file_path, info['cat'], operation))
@@ -424,7 +457,11 @@ class SorterEngine:
                 if cleanup_mode == "Move to Unused":
                     unused_dir = os.path.join(os.path.dirname(file_path), "unused")
                     os.makedirs(unused_dir, exist_ok=True)
-                    shutil.move(file_path, os.path.join(unused_dir, os.path.basename(file_path)))
+                    dest_unused = os.path.join(unused_dir, os.path.basename(file_path))
+                    
+                    shutil.move(file_path, dest_unused)
+                    SorterEngine.fix_permissions(dest_unused) # Fix here too
+                    
                 elif cleanup_mode == "Delete":
                     os.remove(file_path)
         
