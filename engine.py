@@ -354,23 +354,27 @@ class SorterEngine:
         return t_dst, c_dst
 
     @staticmethod
-    def compress_for_web(path, quality, target_size=400):
+    def compress_for_web(path, quality, target_size=None):
         """
-        Loads image, RESIZES it to a thumbnail, and returns bytes.
+        Loads image, resizes smart, and saves as WebP.
         """
         try:
             with Image.open(path) as img:
-                # 1. Convert to RGB (fixes PNG/Transparency issues)
-                img = img.convert("RGB")
+                # 1. Convert to RGB (WebP handles RGBA, but RGB is safer for consistency)
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert("RGB")
                 
-                # 2. HUGE SPEEDUP: Resize before saving
-                # We use 'thumbnail' which maintains aspect ratio
-                img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+                # 2. Smart Resize (Only if target_size is provided)
+                if target_size:
+                    # Only resize if the original is actually bigger
+                    if img.width > target_size or img.height > target_size:
+                        img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
                 
-                # 3. Save to buffer
+                # 3. Save as WebP
                 buf = BytesIO()
-                img.save(buf, format="JPEG", quality=quality, optimize=True)
-                return buf.getvalue() # Return bytes directly for caching
+                # WebP is faster to decode in browser and smaller on disk
+                img.save(buf, format="WEBP", quality=quality)
+                return buf.getvalue()
         except Exception: 
             return None
 
