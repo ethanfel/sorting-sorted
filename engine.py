@@ -10,30 +10,24 @@ class SorterEngine:
     # --- 1. DATABASE INITIALIZATION ---
     @staticmethod
     def init_db():
-        """Initializes all SQLite tables for the multi-tab system."""
+        """Initializes tables, including the new HISTORY log."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         
-        # Profiles Table: 9 columns for independent tab paths
+        # Existing tables...
         cursor.execute('''CREATE TABLE IF NOT EXISTS profiles 
-            (name TEXT PRIMARY KEY, 
-             tab1_target TEXT, 
-             tab2_target TEXT, tab2_control TEXT, 
-             tab4_source TEXT, tab4_out TEXT,
-             mode TEXT,
-             tab5_source TEXT, tab5_out TEXT)''')
-        
+            (name TEXT PRIMARY KEY, tab1_target TEXT, tab2_target TEXT, tab2_control TEXT, 
+             tab4_source TEXT, tab4_out TEXT, mode TEXT, tab5_source TEXT, tab5_out TEXT)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS folder_ids (path TEXT PRIMARY KEY, folder_id INTEGER)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY)''')
-        
-        # Staging Area: Tracks pending renames for the Gallery Tab
         cursor.execute('''CREATE TABLE IF NOT EXISTS staging_area 
-            (original_path TEXT PRIMARY KEY, 
-             target_category TEXT, 
-             new_name TEXT, 
-             is_marked INTEGER DEFAULT 0)''')
+            (original_path TEXT PRIMARY KEY, target_category TEXT, new_name TEXT, is_marked INTEGER DEFAULT 0)''')
+            
+        # --- NEW: HISTORY TABLE ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS processed_log 
+            (source_path TEXT PRIMARY KEY, category TEXT, action_type TEXT)''')
         
-        # Seed default categories
+        # Seed categories if empty
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
             for cat in ["_TRASH", "Default", "Action", "Solo"]:
@@ -69,6 +63,31 @@ class SorterEngine:
         cursor.execute("INSERT OR REPLACE INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", new_values)
         conn.commit()
         conn.close()
+    @staticmethod
+    def load_batch_parallel(image_paths, quality):
+        """
+        Multithreaded loader: Compresses multiple images in parallel.
+        Returns a dictionary {path: bytes_io}
+        """
+        import concurrent.futures
+        
+        results = {}
+        
+        # Helper function to run in thread
+        def process_one(path):
+            return path, SorterEngine.compress_for_web(path, quality)
+
+        # Use ThreadPool to parallelize IO-bound tasks
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            # Submit all tasks
+            future_to_path = {executor.submit(process_one, p): p for p in image_paths}
+            
+            # Gather results as they complete
+            for future in concurrent.futures.as_completed(future_to_path):
+                path, data = future.result()
+                results[path] = data
+                
+        return results
 
     @staticmethod
     def load_profiles():
@@ -234,22 +253,19 @@ class SorterEngine:
         return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
         
     @staticmethod
-    def commit_staging(output_root, cleanup_mode, source_root=None):
-        """Global commit directly to output root (No Subfolders)."""
+    def commit_global(output_root, cleanup_mode, operation="Move", source_root=None):
+        """Commits ALL staged files (Global Apply)."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        staged_paths = set(data.keys())
         
-        if not os.path.exists(output_root):
-            os.makedirs(output_root, exist_ok=True)
+        if not os.path.exists(output_root): os.makedirs(output_root, exist_ok=True)
         
+        # 1. Process all Staged Items
         for old_p, info in data.items():
             if os.path.exists(old_p):
-                # CHANGED: Direct move to root
                 final_dst = os.path.join(output_root, info['name'])
                 
-                # Collision Safety for global commit
                 if os.path.exists(final_dst):
                     root, ext = os.path.splitext(info['name'])
                     c = 1
@@ -257,17 +273,28 @@ class SorterEngine:
                          final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
                          c += 1
 
-                shutil.move(old_p, final_dst)
-        
+                if operation == "Copy":
+                    shutil.copy2(old_p, final_dst)
+                else:
+                    shutil.move(old_p, final_dst)
+                
+                # Log History
+                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
+                               (old_p, info['cat'], operation))
+
+        # 2. Global Cleanup (Optional)
+        # Only run cleanup if explicitly asked, as global cleanup is risky
         if cleanup_mode != "Keep" and source_root:
-            for img_p in SorterEngine.get_images(source_root, recursive=True):
-                if img_p not in staged_paths:
+            all_imgs = SorterEngine.get_images(source_root, recursive=True)
+            for img_p in all_imgs:
+                if img_p not in data: # Not currently staged
                     if cleanup_mode == "Move to Unused":
-                        un_dir = os.path.join(source_root, "unused")
-                        os.makedirs(un_dir, exist_ok=True)
-                        shutil.move(img_p, os.path.join(un_dir, os.path.basename(img_p)))
-                    elif cleanup_mode == "Delete": os.remove(img_p)
-        
+                        unused_dir = os.path.join(source_root, "unused")
+                        os.makedirs(unused_dir, exist_ok=True)
+                        shutil.move(img_p, os.path.join(unused_dir, os.path.basename(img_p)))
+                    elif cleanup_mode == "Delete": 
+                        os.remove(img_p)
+
         cursor.execute("DELETE FROM staging_area")
         conn.commit()
         conn.close()
@@ -347,27 +374,33 @@ class SorterEngine:
                 shutil.move(action['c_dst'], action['c_src'])
             
     @staticmethod
+    def get_processed_log():
+        """Retrieves history of processed files."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM processed_log")
+        rows = cursor.fetchall()
+        conn.close()
+        return {r[0]: {"cat": r[1], "action": r[2]} for r in rows}
+
+    @staticmethod
     def commit_batch(file_list, output_root, cleanup_mode, operation="Move"):
-        """
-        Commits files with support for both MOVE and COPY.
-        """
+        """Commits specified files and LOGS them to history."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         
-        # Ensure output root exists
-        if not os.path.exists(output_root):
-            os.makedirs(output_root, exist_ok=True)
+        if not os.path.exists(output_root): os.makedirs(output_root, exist_ok=True)
         
         for file_path in file_list:
             if not os.path.exists(file_path): continue
             
-            # --- CASE A: File is TAGGED ---
+            # --- CASE A: Tagged ---
             if file_path in data and data[file_path]['marked']:
                 info = data[file_path]
                 final_dst = os.path.join(output_root, info['name'])
                 
-                # Collision Safety
+                # Collision Check
                 if os.path.exists(final_dst):
                     root, ext = os.path.splitext(info['name'])
                     c = 1
@@ -375,22 +408,21 @@ class SorterEngine:
                          final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
                          c += 1
                 
-                # OPERATION CHECK: Move vs Copy
+                # Action
                 if operation == "Copy":
-                    shutil.copy2(file_path, final_dst) # copy2 preserves metadata
+                    shutil.copy2(file_path, final_dst)
                 else:
                     shutil.move(file_path, final_dst)
 
-                # Remove from staging database
+                # Update DB: Remove from Staging, Add to History
                 cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
+                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
+                               (file_path, info['cat'], operation))
                 
-            # --- CASE B: File is UNTAGGED (Cleanup) ---
-            # Note: If we COPIED a tagged file, the original stays in source, 
-            # but this 'elif' ensures we don't accidentally delete it as 'untagged'.
+            # --- CASE B: Cleanup ---
             elif cleanup_mode != "Keep":
                 if cleanup_mode == "Move to Unused":
-                    parent = os.path.dirname(file_path)
-                    unused_dir = os.path.join(parent, "unused")
+                    unused_dir = os.path.join(os.path.dirname(file_path), "unused")
                     os.makedirs(unused_dir, exist_ok=True)
                     shutil.move(file_path, os.path.join(unused_dir, os.path.basename(file_path)))
                 elif cleanup_mode == "Delete":
