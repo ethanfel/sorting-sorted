@@ -97,13 +97,27 @@ def view_high_res(img_path):
         st.image(img_data, use_container_width=True)
         st.caption(f"Filename: {os.path.basename(img_path)}")
 
+@st.dialog("🖼️ Tag Preview", width="large")
+def view_tag_preview(img_path, title):
+    """Shows the image associated with a number in the grid."""
+    st.subheader(title)
+    
+    # Load image (Fast WebP)
+    # We use target_size=800 for a good quality preview
+    img_data = SorterEngine.compress_for_web(img_path, quality=80, target_size=800)
+    
+    if img_data:
+        st.image(img_data, use_container_width=True)
+        st.caption(f"Source: {img_path}")
+    else:
+        st.error(f"Could not load image: {img_path}")
 
 # ==========================================
 # 3. FRAGMENTS
 # ==========================================
 
 @st.fragment
-def render_sidebar_content(path_o): # <--- NOTE: Added path_o argument
+def render_sidebar_content(path_o):
     st.divider()
     st.subheader("🏷️ Category Manager")
     
@@ -124,25 +138,26 @@ def render_sidebar_content(path_o): # <--- NOTE: Added path_o argument
     current_cat = st.session_state.t5_active_cat
     
     # --- 3. VISUAL NUMBER GRID (1-25) ---
-    # Only show if a valid category is selected
     if current_cat and not current_cat.startswith("---"):
         st.caption(f"Map: **{current_cat}**")
         
-        # A. Find Used Indices (Staging + Disk)
-        used_indices = set()
+        # A. Build Index Map: { number: image_path }
+        # We check both Staging (Memory) and Output (Disk)
+        index_map = {}
         
-        # Check Staging
+        # 1. Check Staging
         staged = SorterEngine.get_staged_data()
-        for v in staged.values():
-            if v['cat'] == current_cat:
-                # Extract number from "Category_005.jpg"
+        for orig_path, info in staged.items():
+            if info['cat'] == current_cat:
                 try:
-                    parts = v['name'].rsplit('_', 1) # ["Category", "005.jpg"]
-                    num_part = parts[1].split('.')[0] # "005"
-                    used_indices.add(int(num_part))
+                    # Parse "Category_005.jpg" -> 5
+                    parts = info['name'].rsplit('_', 1)
+                    num_part = parts[1].split('.')[0]
+                    idx = int(num_part)
+                    index_map[idx] = orig_path # Store ORIGINAL source path for preview
                 except: pass
 
-        # Check Disk
+        # 2. Check Disk (Output Folder)
         cat_path = os.path.join(path_o, current_cat)
         if os.path.exists(cat_path):
             for f in os.listdir(cat_path):
@@ -150,24 +165,33 @@ def render_sidebar_content(path_o): # <--- NOTE: Added path_o argument
                     try:
                         parts = f.rsplit('_', 1)
                         num_part = parts[1].split('.')[0]
-                        used_indices.add(int(num_part))
+                        idx = int(num_part)
+                        # Only add if not in staging (Staging overrides disk visually)
+                        if idx not in index_map:
+                            index_map[idx] = os.path.join(cat_path, f)
                     except: pass
         
         # B. Render 5x5 Grid
-        # We use a helper to update the index when clicked
-        def set_index(i):
-            st.session_state.t5_next_index = i
-
         grid_cols = st.columns(5, gap="small")
         for i in range(1, 26):
-            is_used = i in used_indices
+            is_used = i in index_map
             btn_type = "primary" if is_used else "secondary"
             
             with grid_cols[(i-1) % 5]:
-                # If used, it's green. If clicked, it sets the index.
-                st.button(f"{i}", key=f"grid_{i}", type=btn_type, 
-                          use_container_width=True,
-                          on_click=set_index, args=(i,))
+                # We handle the click logic manually here instead of a callback
+                # to trigger the dialog properly.
+                if st.button(f"{i}", key=f"grid_{i}", type=btn_type, use_container_width=True):
+                    # 1. Set the Index
+                    st.session_state.t5_next_index = i
+                    
+                    # 2. If image exists, SHOW DIALOG
+                    if is_used:
+                        file_path = index_map[i]
+                        view_tag_preview(file_path, f"{current_cat} #{i}")
+                    else:
+                        # Optional: Just toast that it's set
+                        st.toast(f"Next Index set to #{i}")
+                        
         st.divider()
 
     # --- 4. RADIO SELECTION ---
@@ -182,7 +206,8 @@ def render_sidebar_content(path_o): # <--- NOTE: Added path_o argument
     c_num1.number_input("Next Number #", min_value=1, step=1, key="t5_next_index")
     
     if c_num2.button("🔄", help="Auto-detect next number"):
-        # Simple auto-detect: Max used + 1
+        # Max used + 1
+        used_indices = index_map.keys()
         next_val = max(used_indices) + 1 if used_indices else 1
         st.session_state.t5_next_index = next_val
         st.rerun()
@@ -199,7 +224,6 @@ def render_sidebar_content(path_o): # <--- NOTE: Added path_o argument
                 SorterEngine.add_category(new_cat)
                 st.rerun()
     with tab_edit:
-        # (Existing Edit logic)
         target_cat = st.session_state.t5_active_cat
         if target_cat and not target_cat.startswith("---") and target_cat in cats:
             st.caption(f"Editing: **{target_cat}**")
