@@ -121,6 +121,10 @@ def render_gallery_grid(current_batch, quality, grid_cols):
     selected_cat = st.session_state.get("t5_active_cat", "Default")
     tagging_disabled = selected_cat.startswith("---")
 
+    # --- NEW: LOAD ALL IMAGES IN PARALLEL ---
+    # This runs multithreaded and is much faster than the old loop
+    batch_cache = SorterEngine.load_batch_parallel(current_batch, quality)
+
     cols = st.columns(grid_cols)
     for idx, img_path in enumerate(current_batch):
         unique_key = f"frag_{os.path.basename(img_path)}"
@@ -138,8 +142,10 @@ def render_gallery_grid(current_batch, quality, grid_cols):
                 elif is_processed:
                     st.info(f"✅ {history[img_path]['action']} -> {history[img_path]['cat']}")
 
-                img_data = SorterEngine.compress_for_web(img_path, quality)
-                if img_data: st.image(img_data, use_container_width=True)
+                # --- CHANGED: USE PRE-LOADED DATA ---
+                img_data = batch_cache.get(img_path)
+                if img_data: 
+                    st.image(img_data, use_container_width=True)
 
                 if not is_staged:
                     st.button("Tag", key=f"tag_{unique_key}", disabled=tagging_disabled, use_container_width=True,
