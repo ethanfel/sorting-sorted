@@ -253,7 +253,7 @@ class SorterEngine:
         return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
         
     @staticmethod
-    def commit_global(output_root, cleanup_mode, operation="Move", source_root=None):
+    def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None):
         """Commits ALL staged files and fixes permissions."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
@@ -414,7 +414,7 @@ class SorterEngine:
             pass # Ignore errors if OS doesn't support chmod (e.g. some Windows setups)
 
     @staticmethod
-    def commit_batch(file_list, output_root, cleanup_mode, operation="Move"):
+    def commit_batch(file_list, output_root, cleanup_mode, operation="Copy"):
         """Commits files and fixes permissions."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
