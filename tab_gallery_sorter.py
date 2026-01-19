@@ -103,10 +103,11 @@ def view_high_res(img_path):
 # ==========================================
 
 @st.fragment
-def render_sidebar_content():
+def render_sidebar_content(path_o): # <--- NOTE: Added path_o argument
     st.divider()
     st.subheader("🏷️ Category Manager")
     
+    # --- 1. PREPARE CATEGORIES ---
     cats = SorterEngine.get_categories()
     processed_cats = []
     last_char = ""
@@ -118,27 +119,77 @@ def render_sidebar_content():
             processed_cats.append(cat)
             last_char = current_char
 
+    # --- 2. STATE SYNC ---
     if "t5_active_cat" not in st.session_state: st.session_state.t5_active_cat = cats[0] if cats else "Default"
-    current_selection = st.session_state.t5_active_cat
-    if not current_selection.startswith("---") and current_selection not in cats:
-        st.session_state.t5_active_cat = cats[0] if cats else "Default"
+    current_cat = st.session_state.t5_active_cat
+    
+    # --- 3. VISUAL NUMBER GRID (1-25) ---
+    # Only show if a valid category is selected
+    if current_cat and not current_cat.startswith("---"):
+        st.caption(f"Map: **{current_cat}**")
+        
+        # A. Find Used Indices (Staging + Disk)
+        used_indices = set()
+        
+        # Check Staging
+        staged = SorterEngine.get_staged_data()
+        for v in staged.values():
+            if v['cat'] == current_cat:
+                # Extract number from "Category_005.jpg"
+                try:
+                    parts = v['name'].rsplit('_', 1) # ["Category", "005.jpg"]
+                    num_part = parts[1].split('.')[0] # "005"
+                    used_indices.add(int(num_part))
+                except: pass
 
+        # Check Disk
+        cat_path = os.path.join(path_o, current_cat)
+        if os.path.exists(cat_path):
+            for f in os.listdir(cat_path):
+                if f.startswith(current_cat) and "_" in f:
+                    try:
+                        parts = f.rsplit('_', 1)
+                        num_part = parts[1].split('.')[0]
+                        used_indices.add(int(num_part))
+                    except: pass
+        
+        # B. Render 5x5 Grid
+        # We use a helper to update the index when clicked
+        def set_index(i):
+            st.session_state.t5_next_index = i
+
+        grid_cols = st.columns(5, gap="small")
+        for i in range(1, 26):
+            is_used = i in used_indices
+            btn_type = "primary" if is_used else "secondary"
+            
+            with grid_cols[(i-1) % 5]:
+                # If used, it's green. If clicked, it sets the index.
+                st.button(f"{i}", key=f"grid_{i}", type=btn_type, 
+                          use_container_width=True,
+                          on_click=set_index, args=(i,))
+        st.divider()
+
+    # --- 4. RADIO SELECTION ---
     selection = st.radio("Active Tag", processed_cats, key="t5_radio_select")
     if not selection.startswith("---"): st.session_state.t5_active_cat = selection
 
-    # Manual Index Control (Sidebar Backup)
+    # --- 5. MANUAL INPUT ---
     st.caption("Tagging Settings")
     c_num1, c_num2 = st.columns([3, 1], vertical_alignment="bottom")
     if "t5_next_index" not in st.session_state: st.session_state.t5_next_index = 1
+    
     c_num1.number_input("Next Number #", min_value=1, step=1, key="t5_next_index")
+    
     if c_num2.button("🔄", help="Auto-detect next number"):
-        staged = SorterEngine.get_staged_data()
-        current_cat = st.session_state.t5_active_cat
-        count = len([v for v in staged.values() if v['cat'] == current_cat])
-        st.session_state.t5_next_index = count + 1
+        # Simple auto-detect: Max used + 1
+        next_val = max(used_indices) + 1 if used_indices else 1
+        st.session_state.t5_next_index = next_val
         st.rerun()
 
     st.divider()
+    
+    # ... (Add/Edit Tabs - Keep existing code) ...
     tab_add, tab_edit = st.tabs(["➕ Add", "✏️ Edit"])
     with tab_add:
         c1, c2 = st.columns([3, 1])
@@ -148,6 +199,7 @@ def render_sidebar_content():
                 SorterEngine.add_category(new_cat)
                 st.rerun()
     with tab_edit:
+        # (Existing Edit logic)
         target_cat = st.session_state.t5_active_cat
         if target_cat and not target_cat.startswith("---") and target_cat in cats:
             st.caption(f"Editing: **{target_cat}**")
@@ -295,7 +347,24 @@ def render_gallery_grid(current_batch, quality, grid_cols, path_o):
                         use_container_width=True, on_click=cb_tag_image, 
                         args=(img_path, selected_cat, card_index, path_o))
                 else:
-                    st.button("Untag", key=f"untag_{unique_key}", use_container_width=True,
+                    # CASE: Image is STAGED
+                    # We want to show "Untag (#5)"
+                    
+                    # 1. Get the current filename from staging data
+                    staged_name = staged[img_path]['name'] # e.g., "Category_005.jpg"
+                    
+                    # 2. Extract the number
+                    untag_label = "Untag"
+                    try:
+                        # Split by underscore, grab the last part, remove extension
+                        parts = staged_name.rsplit('_', 1)
+                        if len(parts) > 1:
+                            num_str = parts[1].split('.')[0] # "005"
+                            untag_label = f"Untag (#{int(num_str)})"
+                    except:
+                        pass
+
+                    st.button(untag_label, key=f"untag_{unique_key}", use_container_width=True,
                               on_click=cb_untag_image, args=(img_path,))
 
 
@@ -349,7 +418,7 @@ def render(quality, profile_name):
     if not os.path.exists(path_s): return
 
     with st.sidebar:
-        render_sidebar_content()
+        render_sidebar_content(path_o)
 
     with st.expander("👀 View Settings"):
         c_v1, c_v2 = st.columns(2)
