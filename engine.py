@@ -502,3 +502,15 @@ class SorterEngine:
         cursor.execute("DELETE FROM staging_area WHERE target_category = ?", (name,))
         conn.commit()
         conn.close()
+
+    # In engine.py / SorterEngine class
+    @staticmethod
+    def get_tagged_page_indices(all_images, page_size):
+        staged = SorterEngine.get_staged_data()
+        if not staged: return set()
+        tagged_pages = set()
+        staged_keys = set(staged.keys())
+        for idx, img_path in enumerate(all_images):
+            if img_path in staged_keys:
+                tagged_pages.add(idx // page_size)
+        return tagged_pages
