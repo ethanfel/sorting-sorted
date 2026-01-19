@@ -8,7 +8,7 @@ class SorterEngine:
     DB_PATH = "/app/sorter_database.db"
 
     # --- 1. DATABASE INITIALIZATION ---
-   @staticmethod
+    @staticmethod
     def init_db():
         """Initializes tables, including the new HISTORY log."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
