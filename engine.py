@@ -502,3 +502,27 @@ class SorterEngine:
         cursor.execute("DELETE FROM staging_area WHERE target_category = ?", (name,))
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def get_tagged_page_indices(all_images, page_size):
+        """
+        Returns a Set of page numbers (0-indexed) that contain at least one staged image.
+        """
+        staged = SorterEngine.get_staged_data()
+        if not staged:
+            return set()
+            
+        tagged_pages = set()
+        staged_keys = set(staged.keys())
+        
+        # We iterate only through the staged items to find their page index
+        # This is faster than iterating all images if staged < total
+        # However, we need the index from the main list. 
+        # Since we need order, iterating all_images once is safest and fast enough.
+        
+        for idx, img_path in enumerate(all_images):
+            if img_path in staged_keys:
+                page_idx = idx // page_size
+                tagged_pages.add(page_idx)
+                
+        return tagged_pages
