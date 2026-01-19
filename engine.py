@@ -354,14 +354,25 @@ class SorterEngine:
         return t_dst, c_dst
 
     @staticmethod
-    def compress_for_web(path, quality):
-        """Compresses images for UI performance."""
+    def compress_for_web(path, quality, target_size=400):
+        """
+        Loads image, RESIZES it to a thumbnail, and returns bytes.
+        """
         try:
             with Image.open(path) as img:
+                # 1. Convert to RGB (fixes PNG/Transparency issues)
+                img = img.convert("RGB")
+                
+                # 2. HUGE SPEEDUP: Resize before saving
+                # We use 'thumbnail' which maintains aspect ratio
+                img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
+                
+                # 3. Save to buffer
                 buf = BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=quality)
-                return buf
-        except: return None
+                img.save(buf, format="JPEG", quality=quality, optimize=True)
+                return buf.getvalue() # Return bytes directly for caching
+        except Exception: 
+            return None
 
     @staticmethod
     def revert_action(action):
