@@ -112,6 +112,22 @@ def render_sidebar_content():
         else:
             st.info("Select a valid category to edit.")
 
+@st.dialog("🔍 High-Res Inspection", width="large")
+def view_high_res(img_path):
+    """
+    Opens a modal and loads the ORIGINAL size image on demand.
+    We still compress to WebP (q=90) to ensure it sends fast, 
+    but we do NOT resize the dimensions.
+    """
+    # Load with target_size=None to keep original dimensions
+    # Quality=90 for high fidelity
+    img_data = SorterEngine.compress_for_web(img_path, quality=90, target_size=None)
+    
+    if img_data:
+        st.image(img_data, use_container_width=True)
+        st.caption(f"Filename: {os.path.basename(img_path)}")
+    else:
+        st.error("Could not load full resolution image.")
 
 # ... (Gallery Grid code remains exactly the same) ...
 # --- UPDATED CACHE FUNCTION ---
@@ -162,18 +178,26 @@ def render_gallery_grid(current_batch, quality, grid_cols):
             is_processed = img_path in history
             
             with st.container(border=True):
-                # Header
-                c_head1, c_head2 = st.columns([5, 1])
-                c_head1.caption(os.path.basename(img_path)[:15])
-                c_head2.button("❌", key=f"del_{unique_key}", on_click=cb_delete_image, args=(img_path,))
+                # HEADER LAYOUT: [Name (4)] [Zoom (1)] [Delete (1)]
+                c_name, c_zoom, c_del = st.columns([4, 1, 1])
+                
+                c_name.caption(os.path.basename(img_path)[:10])
+                
+                # --- NEW ZOOM BUTTON ---
+                # When clicked, it calls the dialog function.
+                if c_zoom.button("🔍", key=f"zoom_{unique_key}", help="View Full Size"):
+                    view_high_res(img_path)
+                
+                # DELETE BUTTON
+                c_del.button("❌", key=f"del_{unique_key}", on_click=cb_delete_image, args=(img_path,))
 
-                # Status
+                # STATUS BANNERS...
                 if is_staged:
                     st.success(f"🏷️ {staged[img_path]['cat']}")
                 elif is_processed:
                     st.info(f"✅ {history[img_path]['action']}")
 
-                # Image
+                # THUMBNAIL IMAGE (Cached, Low Res)
                 img_data = batch_cache.get(img_path)
                 if img_data: 
                     st.image(img_data, use_container_width=True)
