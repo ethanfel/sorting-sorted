@@ -236,6 +236,7 @@ def render_sidebar():
 def render_gallery():
     grid_container.clear()
     batch = get_current_batch()
+    # Dynamic thumbnail sizing
     thumb_size = int(1800 / state.grid_cols)
     
     with grid_container:
@@ -243,6 +244,7 @@ def render_gallery():
             for img_path in batch:
                 is_staged = img_path in state.staged_data
                 
+                # Card Container
                 with ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow'):
                     # Header
                     with ui.row().classes('w-full justify-between no-wrap mb-1'):
@@ -251,8 +253,12 @@ def render_gallery():
                             ui.button(icon='zoom_in', on_click=lambda p=img_path: open_zoom_dialog(p)).props('flat size=sm dense color=white')
                             ui.button(icon='delete', on_click=lambda p=img_path: action_delete(p)).props('flat size=sm dense color=red')
 
-                    # Image (Pass Quality Param)
-                    ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}").classes('w-full h-48 object-cover rounded').props('no-spinner')
+                    # --- FIXED IMAGE RENDERING ---
+                    # Changed 'object-cover' to 'object-contain'
+                    # Added 'bg-black' so the empty space around non-square images looks clean
+                    ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
+                        .classes('w-full h-48 object-contain bg-black rounded') \
+                        .props('no-spinner')
                     
                     # Actions
                     if is_staged:
