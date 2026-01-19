@@ -216,23 +216,30 @@ def render_gallery_grid(current_batch, quality, grid_cols):
 def render_batch_actions(current_batch, path_o, page_num, path_s):
     st.write(f"### 🚀 Processing Actions")
     st.caption("Settings apply to both Page and Global actions.")
+    
     c_set1, c_set2 = st.columns(2)
-    op_mode = c_set1.radio("Tagged Files:", ["Move", "Copy"], horizontal=True, key="t5_op_mode")
+    
+    # CHANGED: "Copy" is now first, making it the default
+    op_mode = c_set1.radio("Tagged Files:", ["Copy", "Move"], horizontal=True, key="t5_op_mode")
+    
     cleanup = c_set2.radio("Untagged Files:", ["Keep", "Move to Unused", "Delete"], horizontal=True, key="t5_cleanup_mode")
+    
     st.divider()
+    
     c_btn1, c_btn2 = st.columns(2)
     
+    # BUTTON 1: APPLY PAGE
     if c_btn1.button(f"APPLY PAGE {page_num}", type="secondary", use_container_width=True,
                      on_click=cb_apply_batch, args=(current_batch, path_o, cleanup, op_mode)):
         st.toast(f"Page {page_num} Applied!")
         st.rerun()
 
+    # BUTTON 2: APPLY GLOBAL
     if c_btn2.button("APPLY ALL (GLOBAL)", type="primary", use_container_width=True,
                      help="Process ALL tagged files across all pages.",
                      on_click=cb_apply_global, args=(path_o, cleanup, op_mode, path_s)):
         st.toast("Global Apply Complete!")
         st.rerun()
-
 
 # ==========================================
 # 4. MAIN RENDERER
