@@ -169,24 +169,35 @@ def render_sidebar():
     with sidebar_container:
         ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2')
         
-        # 1. 5x5 Visual Grid
+        # 1. FETCH & VALIDATE CATEGORIES
+        categories = SorterEngine.get_categories()
+        
+        # Safety: Ensure list isn't empty
+        if not categories:
+            categories = ["Default"]
+            
+        # Safety: Ensure active_cat exists in the list
+        if state.active_cat not in categories:
+            state.active_cat = categories[0]
+            # We must refresh the staged info if the category changed drastically
+            refresh_staged_info() 
+
+        # 2. 5x5 Visual Grid
         with ui.grid(columns=5).classes('gap-1 mb-4'):
             for i in range(1, 26):
                 is_used = i in state.index_map
                 # NiceGUI allows dynamic coloring easily
                 color = 'green' if is_used else 'grey-3'
                 
-                btn = ui.button(str(i), on_click=lambda i=i: set_index(i))
-                btn.props(f'color={color} size=sm flat')
-                # If used, add a green dot visual (or just use button color)
+                # We use a closure for the callback
+                ui.button(str(i), on_click=lambda i=i: set_index(i)) \
+                    .props(f'color={color} size=sm flat')
         
         def set_index(i):
             state.next_index = i
             idx_input.set_value(i)
 
-        # 2. Controls
-        categories = SorterEngine.get_categories() or ["Default"]
-        
+        # 3. Controls
         def update_cat(e):
             state.active_cat = e.value
             refresh_staged_info() # Updates the grid map
@@ -202,7 +213,7 @@ def render_sidebar():
             used = state.index_map.keys()
             state.next_index = max(used) + 1 if used else 1
             idx_input.set_value(state.next_index)
-
+            
 def render_gallery():
     grid_container.clear()
     batch = get_current_batch()
