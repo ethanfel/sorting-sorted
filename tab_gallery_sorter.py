@@ -30,9 +30,9 @@ def cb_delete_image(img_path):
     """Moves image to trash."""
     SorterEngine.delete_to_trash(img_path)
 
-def cb_apply_batch(current_batch, path_o, cleanup_mode):
-    """Commits files to disk."""
-    SorterEngine.commit_batch(current_batch, path_o, cleanup_mode)
+def cb_apply_batch(current_batch, path_o, cleanup_mode, operation):
+    """Commits the batch with the specified operation (Move/Copy)."""
+    SorterEngine.commit_batch(current_batch, path_o, cleanup_mode, operation)
 
 def cb_change_page(delta):
     """Updates page number (-1 or +1)."""
@@ -173,14 +173,23 @@ def render_gallery_grid(current_batch, quality, grid_cols):
 def render_batch_actions(current_batch, path_o, page_num):
     st.write(f"### 🚀 Batch Actions (Page {page_num})")
     
-    c_act1, c_act2 = st.columns([3, 1])
-    cleanup = c_act1.radio("Untagged Action:", ["Keep", "Move to Unused", "Delete"], 
+    # We use columns to organize the settings clearly
+    c_set1, c_set2, c_btn = st.columns([2, 2, 1.5], vertical_alignment="bottom")
+    
+    # 1. Operation for TAGGED files
+    op_mode = c_set1.radio("Tagged Files:", ["Move", "Copy"], 
+                           horizontal=True, key="t5_op_mode")
+    
+    # 2. Action for UNTAGGED files
+    cleanup = c_set2.radio("Untagged Files:", ["Keep", "Move to Unused", "Delete"], 
                            horizontal=True, key="t5_cleanup_mode")
     
-    if c_act2.button("APPLY PAGE", type="primary", use_container_width=True):
-        with st.spinner("Processing..."):
-            SorterEngine.commit_batch(current_batch, path_o, cleanup)
+    # 3. Apply Button
+    # Note: We added 'op_mode' to the args
+    if c_btn.button(f"APPLY ({op_mode})", type="primary", use_container_width=True,
+                    on_click=cb_apply_batch, args=(current_batch, path_o, cleanup, op_mode)):
         st.success("Batch processed!")
+        # Rerun to show changes (files disappearing or remaining depending on copy/move)
         st.rerun()
 
 
