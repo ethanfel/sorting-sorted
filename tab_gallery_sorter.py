@@ -114,6 +114,13 @@ def render_sidebar_content():
 
 
 # ... (Gallery Grid code remains exactly the same) ...
+# --- NEW CACHED FUNCTION ---
+# This saves the thumbnail in RAM. 
+# We include 'mtime' so if the file changes on disk, the cache invalidates.
+@st.cache_data(show_spinner=False, max_entries=2000)
+def get_cached_thumbnail(path, quality, target_size, mtime):
+    return SorterEngine.compress_for_web(path, quality, target_size)
+
 @st.fragment
 def render_gallery_grid(current_batch, quality, grid_cols):
     staged = SorterEngine.get_staged_data()
@@ -121,10 +128,32 @@ def render_gallery_grid(current_batch, quality, grid_cols):
     selected_cat = st.session_state.get("t5_active_cat", "Default")
     tagging_disabled = selected_cat.startswith("---")
 
-    # --- NEW: LOAD ALL IMAGES IN PARALLEL ---
-    # This runs multithreaded and is much faster than the old loop
-    batch_cache = SorterEngine.load_batch_parallel(current_batch, quality)
+    # 1. CALCULATE OPTIMAL SIZE
+    # If 8 columns, we need small images (200px). If 2 cols, big images (800px).
+    # This keeps it crisp but fast.
+    target_size = int(1600 / grid_cols)
 
+    # 2. PARALLEL LOAD WITH CACHING
+    # We use a ThreadPool to fill the cache quickly
+    import concurrent.futures
+    
+    batch_cache = {}
+    
+    def fetch_one(p):
+        try:
+            # We pass mtime to ensure cache freshness
+            mtime = os.path.getmtime(p)
+            return p, get_cached_thumbnail(p, quality, target_size, mtime)
+        except:
+            return p, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_path = {executor.submit(fetch_one, p): p for p in current_batch}
+        for future in concurrent.futures.as_completed(future_to_path):
+            p, data = future.result()
+            batch_cache[p] = data
+
+    # 3. RENDER GRID
     cols = st.columns(grid_cols)
     for idx, img_path in enumerate(current_batch):
         unique_key = f"frag_{os.path.basename(img_path)}"
@@ -133,6 +162,7 @@ def render_gallery_grid(current_batch, quality, grid_cols):
             is_processed = img_path in history
             
             with st.container(border=True):
+                # ... (Header/Delete code same as before) ...
                 c_head1, c_head2 = st.columns([5, 1])
                 c_head1.caption(os.path.basename(img_path)[:15])
                 c_head2.button("❌", key=f"del_{unique_key}", on_click=cb_delete_image, args=(img_path,))
@@ -140,13 +170,14 @@ def render_gallery_grid(current_batch, quality, grid_cols):
                 if is_staged:
                     st.success(f"🏷️ {staged[img_path]['cat']}")
                 elif is_processed:
-                    st.info(f"✅ {history[img_path]['action']} -> {history[img_path]['cat']}")
+                    st.info(f"✅ {history[img_path]['action']}")
 
-                # --- CHANGED: USE PRE-LOADED DATA ---
+                # DISPLAY FROM CACHE
                 img_data = batch_cache.get(img_path)
                 if img_data: 
                     st.image(img_data, use_container_width=True)
 
+                # ... (Buttons code same as before) ...
                 if not is_staged:
                     st.button("Tag", key=f"tag_{unique_key}", disabled=tagging_disabled, use_container_width=True,
                               on_click=cb_tag_image, args=(img_path, selected_cat))
