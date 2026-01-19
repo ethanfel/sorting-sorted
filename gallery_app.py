@@ -157,11 +157,18 @@ def action_apply_page(mode="Copy", cleanup="Keep"):
 # ==========================================
 
 def open_zoom_dialog(path):
-    with ui.dialog() as dialog, ui.card().classes('w-full max-w-4xl'):
-        ui.label(os.path.basename(path)).classes('text-lg font-bold')
-        # Use the /full_res route for high quality
-        ui.image(f"/full_res?path={path}").classes('w-full rounded')
-        ui.button('Close', on_click=dialog.close).classes('w-full')
+    # 'w-full max-w-screen-xl' makes it nearly full width on large monitors
+    with ui.dialog() as dialog, ui.card().classes('w-full max-w-screen-xl p-0 gap-0 bg-black'):
+        
+        # Header Bar inside the dialog
+        with ui.row().classes('w-full justify-between items-center p-2 bg-gray-900 text-white'):
+            ui.label(os.path.basename(path)).classes('text-lg font-bold truncate')
+            ui.button(icon='close', on_click=dialog.close).props('flat round dense color=white')
+            
+        # Image area - remove restrictions so it fills the card
+        # We use a high-res request
+        ui.image(f"/full_res?path={path}").classes('w-full h-auto object-contain')
+        
     dialog.open()
 
 def render_sidebar():
@@ -306,34 +313,36 @@ def handle_key(e):
     if e.key.arrow_right: set_page(state.page + 1)
     # Add number keys 1-9 to set category or tag quickly?
     
-# ==========================================
+## ==========================================
 # 6. MAIN LAYOUT
 # ==========================================
 
-# 1. HEADER (Adaptive Color + Dark Mode Toggle)
-# We removed 'bg-white' so it respects dark mode.
-with ui.header().classes('items-center justify-between bg-slate-900 text-white').style('height: 70px'):
+# 1. HEADER (Adaptive & Stretchy Inputs)
+with ui.header().classes('items-center justify-between bg-slate-900 text-white border-b border-gray-700').style('height: 70px'):
     
-    with ui.row().classes('items-center gap-2'):
-        ui.label('🖼️ Sorter').classes('text-xl font-bold mr-4')
+    # We use a single row with 'no-wrap' to keep everything on one line
+    with ui.row().classes('w-full items-center gap-4 no-wrap'):
         
-        # WIDER INPUTS (w-96 is approx 400px)
-        # We use 'props' to set specific dark mode styling for inputs
-        ui.input('Source').bind_value(state, 'source_dir') \
-            .classes('w-96').props('dark dense outlined')
+        # Logo
+        ui.label('🖼️ Sorter').classes('text-xl font-bold shrink-0')
+        
+        # INPUTS: 'flex-grow' makes them stretch to fill ALL available space
+        # We wrap them in a flexible row so they share the space 50/50
+        with ui.row().classes('flex-grow gap-4'):
+            ui.input('Source').bind_value(state, 'source_dir') \
+                .classes('flex-grow').props('dark dense outlined input-class="text-green-300"')
+                
+            ui.input('Output').bind_value(state, 'output_dir') \
+                .classes('flex-grow').props('dark dense outlined input-class="text-blue-300"')
             
-        ui.input('Output').bind_value(state, 'output_dir') \
-            .classes('w-96').props('dark dense outlined')
-            
-        ui.button('Load', on_click=load_images).props('dense flat color=white')
+        # Buttons (shrink-0 prevents them from getting squished)
+        ui.button('Load', on_click=load_images).props('dense flat color=white').classes('shrink-0')
 
-    # Right side: Dark Mode Toggle
-    with ui.row().classes('items-center'):
-        # Toggle switch for Dark Mode
+        # Dark Mode Toggle
         dark = ui.dark_mode()
-        dark.enable() # Enable by default
+        dark.enable()
         ui.switch('Dark', value=True, on_change=lambda e: dark.set_value(e.value)) \
-            .props('color=green')
+            .props('color=green').classes('shrink-0')
 
 # 2. LEFT SIDEBAR
 with ui.left_drawer(value=True).classes('bg-gray-900 p-4 border-r border-gray-700').props('width=320') as drawer:
