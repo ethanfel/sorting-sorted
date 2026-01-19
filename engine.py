@@ -347,9 +347,9 @@ class SorterEngine:
                 shutil.move(action['c_dst'], action['c_src'])
             
     @staticmethod
-    def commit_batch(file_list, output_root, cleanup_mode):
+    def commit_batch(file_list, output_root, cleanup_mode, operation="Move"):
         """
-        Commits files directly to the output root (No Subfolders).
+        Commits files with support for both MOVE and COPY.
         """
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
@@ -365,11 +365,9 @@ class SorterEngine:
             # --- CASE A: File is TAGGED ---
             if file_path in data and data[file_path]['marked']:
                 info = data[file_path]
-                
-                # CHANGED: Destination is now directly the output_root, not a subfolder
                 final_dst = os.path.join(output_root, info['name'])
                 
-                # Collision Safety: If Action_001.jpg exists, try Action_001_1.jpg
+                # Collision Safety
                 if os.path.exists(final_dst):
                     root, ext = os.path.splitext(info['name'])
                     c = 1
@@ -377,10 +375,18 @@ class SorterEngine:
                          final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
                          c += 1
                 
-                shutil.move(file_path, final_dst)
+                # OPERATION CHECK: Move vs Copy
+                if operation == "Copy":
+                    shutil.copy2(file_path, final_dst) # copy2 preserves metadata
+                else:
+                    shutil.move(file_path, final_dst)
+
+                # Remove from staging database
                 cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
                 
             # --- CASE B: File is UNTAGGED (Cleanup) ---
+            # Note: If we COPIED a tagged file, the original stays in source, 
+            # but this 'elif' ensures we don't accidentally delete it as 'untagged'.
             elif cleanup_mode != "Keep":
                 if cleanup_mode == "Move to Unused":
                     parent = os.path.dirname(file_path)
