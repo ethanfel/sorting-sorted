@@ -63,6 +63,31 @@ class SorterEngine:
         cursor.execute("INSERT OR REPLACE INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", new_values)
         conn.commit()
         conn.close()
+    @staticmethod
+    def load_batch_parallel(image_paths, quality):
+        """
+        Multithreaded loader: Compresses multiple images in parallel.
+        Returns a dictionary {path: bytes_io}
+        """
+        import concurrent.futures
+        
+        results = {}
+        
+        # Helper function to run in thread
+        def process_one(path):
+            return path, SorterEngine.compress_for_web(path, quality)
+
+        # Use ThreadPool to parallelize IO-bound tasks
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            # Submit all tasks
+            future_to_path = {executor.submit(process_one, p): p for p in image_paths}
+            
+            # Gather results as they complete
+            for future in concurrent.futures.as_completed(future_to_path):
+                path, data = future.result()
+                results[path] = data
+                
+        return results
 
     @staticmethod
     def load_profiles():
