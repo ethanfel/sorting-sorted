@@ -3,7 +3,26 @@ import os
 import math
 from engine import SorterEngine
 
-# --- CALLBACKS ---
+# ==========================================
+# 1. CACHED DATA LOADER (The Fix)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def get_cached_images(path, mutation_id):
+    """
+    Scans the folder ONLY when 'path' or 'mutation_id' changes.
+    Navigating pages does NOT change these, so it remains instant.
+    """
+    return SorterEngine.get_images(path, recursive=True)
+
+
+# ==========================================
+# 2. CALLBACKS (Updated with Refresh Logic)
+# ==========================================
+def trigger_refresh():
+    """Increments the mutation counter to force a file re-scan."""
+    if 't5_file_id' not in st.session_state: st.session_state.t5_file_id = 0
+    st.session_state.t5_file_id += 1
+
 def cb_tag_image(img_path, selected_cat):
     if selected_cat.startswith("---") or selected_cat == "":
         st.toast("⚠️ Select a valid category first!", icon="🚫")
@@ -13,30 +32,37 @@ def cb_tag_image(img_path, selected_cat):
     count = len([v for v in staged.values() if v['cat'] == selected_cat]) + 1
     new_name = f"{selected_cat}_{count:03d}{ext}"
     SorterEngine.stage_image(img_path, selected_cat, new_name)
+    # Note: Tagging does NOT need a file re-scan, just a grid refresh.
 
 def cb_untag_image(img_path):
     SorterEngine.clear_staged_item(img_path)
 
 def cb_delete_image(img_path):
     SorterEngine.delete_to_trash(img_path)
+    trigger_refresh() # Force re-scan so the image disappears from the list
 
 def cb_apply_batch(current_batch, path_o, cleanup_mode, operation):
-    """Applies ONLY the current page."""
     SorterEngine.commit_batch(current_batch, path_o, cleanup_mode, operation)
+    trigger_refresh() # Force re-scan to remove moved files
 
 def cb_apply_global(path_o, cleanup_mode, operation, path_s):
-    """Applies EVERYTHING in the staging area."""
     SorterEngine.commit_global(path_o, cleanup_mode, operation, source_root=path_s)
+    trigger_refresh() # Force re-scan
 
 def cb_change_page(delta):
     if 't5_page' not in st.session_state: st.session_state.t5_page = 0
     st.session_state.t5_page += delta
+    # No trigger_refresh() here -> This is why page turning is now instant!
 
 def cb_jump_page(k):
     val = st.session_state[k]
     st.session_state.t5_page = val - 1
 
-# --- SIDEBAR FRAGMENT (Manager) ---
+
+# ==========================================
+# 3. FRAGMENTS (Sidebar, Grid, Batch)
+# ==========================================
+# ... (Sidebar code remains exactly the same) ...
 @st.fragment
 def render_sidebar_content():
     st.divider()
@@ -86,13 +112,12 @@ def render_sidebar_content():
         else:
             st.info("Select a valid category to edit.")
 
-# --- GALLERY GRID FRAGMENT ---
+
+# ... (Gallery Grid code remains exactly the same) ...
 @st.fragment
 def render_gallery_grid(current_batch, quality, grid_cols):
     staged = SorterEngine.get_staged_data()
-    # NEW: Fetch processed history
     history = SorterEngine.get_processed_log()
-    
     selected_cat = st.session_state.get("t5_active_cat", "Default")
     tagging_disabled = selected_cat.startswith("---")
 
@@ -108,11 +133,9 @@ def render_gallery_grid(current_batch, quality, grid_cols):
                 c_head1.caption(os.path.basename(img_path)[:15])
                 c_head2.button("❌", key=f"del_{unique_key}", on_click=cb_delete_image, args=(img_path,))
 
-                # STATUS BANNERS
                 if is_staged:
                     st.success(f"🏷️ {staged[img_path]['cat']}")
                 elif is_processed:
-                    # NEW: Show history status
                     st.info(f"✅ {history[img_path]['action']} -> {history[img_path]['cat']}")
 
                 img_data = SorterEngine.compress_for_web(img_path, quality)
@@ -125,36 +148,38 @@ def render_gallery_grid(current_batch, quality, grid_cols):
                     st.button("Untag", key=f"untag_{unique_key}", use_container_width=True,
                               on_click=cb_untag_image, args=(img_path,))
 
-# --- BATCH ACTIONS FRAGMENT ---
+
+# ... (Batch Actions code remains exactly the same) ...
 @st.fragment
 def render_batch_actions(current_batch, path_o, page_num, path_s):
     st.write(f"### 🚀 Processing Actions")
     st.caption("Settings apply to both Page and Global actions.")
-    
     c_set1, c_set2 = st.columns(2)
     op_mode = c_set1.radio("Tagged Files:", ["Move", "Copy"], horizontal=True, key="t5_op_mode")
     cleanup = c_set2.radio("Untagged Files:", ["Keep", "Move to Unused", "Delete"], horizontal=True, key="t5_cleanup_mode")
-    
     st.divider()
-    
     c_btn1, c_btn2 = st.columns(2)
     
-    # BUTTON 1: APPLY PAGE
     if c_btn1.button(f"APPLY PAGE {page_num}", type="secondary", use_container_width=True,
                      on_click=cb_apply_batch, args=(current_batch, path_o, cleanup, op_mode)):
         st.toast(f"Page {page_num} Applied!")
         st.rerun()
 
-    # BUTTON 2: APPLY GLOBAL
     if c_btn2.button("APPLY ALL (GLOBAL)", type="primary", use_container_width=True,
                      help="Process ALL tagged files across all pages.",
                      on_click=cb_apply_global, args=(path_o, cleanup, op_mode, path_s)):
         st.toast("Global Apply Complete!")
         st.rerun()
 
-# --- MAIN RENDERER ---
+
+# ==========================================
+# 4. MAIN RENDERER
+# ==========================================
 def render(quality, profile_name):
     st.subheader("🖼️ Gallery Staging Sorter")
+    
+    # Init Mutation ID (This triggers the scanner cache refresh)
+    if 't5_file_id' not in st.session_state: st.session_state.t5_file_id = 0
     if 't5_page' not in st.session_state: st.session_state.t5_page = 0
     
     profiles = SorterEngine.load_profiles()
@@ -166,6 +191,8 @@ def render(quality, profile_name):
     if path_s != p_data.get("tab5_source") or path_o != p_data.get("tab5_out"):
         if st.button("💾 Save Settings"):
             SorterEngine.save_tab_paths(profile_name, t5_s=path_s, t5_o=path_o)
+            # Saving settings might mean new folder, so we trigger refresh
+            trigger_refresh()
             st.rerun()
 
     if not os.path.exists(path_s): return
@@ -178,7 +205,10 @@ def render(quality, profile_name):
         page_size = c_v1.slider("Images per Page", 12, 100, 24, 4)
         grid_cols = c_v2.slider("Grid Columns", 2, 8, 4)
 
-    all_images = SorterEngine.get_images(path_s, recursive=True)
+    # --- USING CACHED LOADER ---
+    # We pass the mutation ID. If ID is same as last run, scan is SKIPPED.
+    all_images = get_cached_images(path_s, st.session_state.t5_file_id)
+    
     if not all_images:
         st.info("No images found.")
         return
@@ -206,5 +236,4 @@ def render(quality, profile_name):
     nav_controls("bottom")
     st.divider()
     
-    # Pass 'path_s' so global cleanup works if enabled
     render_batch_actions(current_batch, path_o, st.session_state.t5_page + 1, path_s)
