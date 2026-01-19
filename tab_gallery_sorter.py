@@ -64,6 +64,16 @@ def cb_change_page(delta):
 def cb_set_page(page_idx):
     st.session_state.t5_page = page_idx
 
+def cb_slider_change(key):
+    """
+    Updates the page number from the slider.
+    Adjusts for 1-based display (Slider=1 -> Page=0).
+    """
+    # Get the value from the widget
+    val = st.session_state[key]
+    # Update the global page index (0-based)
+    st.session_state.t5_page = val - 1
+
 
 # ==========================================
 # 2. CACHING & DATA LOADING
@@ -152,54 +162,81 @@ def render_sidebar_content():
                 SorterEngine.delete_category(target_cat)
                 st.rerun()
 
-@st.fragment
+# NOTE: Do NOT use @st.fragment here. 
+# Navigation controls must trigger a full app rerun to load the new batch of images.
 def render_pagination_carousel(key_suffix, total_pages, all_images, page_size):
-    """New Carousel with Slider and Green Indicators."""
-    current_page = st.session_state.t5_page
-    if total_pages <= 1: return
+    """
+    Renders pagination with 1-based indexing and smooth callbacks.
+    """
+    # Safety Check
+    if total_pages <= 1: 
+        return
 
-    # 1. Get Tagged Pages
+    current_page = st.session_state.t5_page
+    
+    # 1. Get Tagged Pages (for the Green Dot)
     tagged_pages_set = SorterEngine.get_tagged_page_indices(all_images, page_size)
     
-    # 2. Rapid Seeker Slider
-    new_page = st.slider(
-        "Rapid Navigation", 0, total_pages - 1, current_page, 
-        key=f"slider_{key_suffix}", label_visibility="collapsed"
+    # 2. Rapid Seeker Slider (1-BASED)
+    # We set min=1 and max=total_pages so it looks human-readable.
+    # The callback 'cb_slider_change' handles the -1 conversion.
+    st.slider(
+        "Rapid Navigation", 
+        min_value=1, 
+        max_value=total_pages, 
+        value=current_page + 1, 
+        step=1,
+        key=f"slider_{key_suffix}",
+        label_visibility="collapsed",
+        on_change=cb_slider_change, args=(f"slider_{key_suffix}",)
     )
-    if new_page != current_page:
-        st.session_state.t5_page = new_page
-        st.rerun()
 
     # 3. Button Window Logic
     window_radius = 2 
     start_p = max(0, current_page - window_radius)
     end_p = min(total_pages, current_page + window_radius + 1)
     
-    if current_page < window_radius: end_p = min(total_pages, 5)
-    elif current_page > total_pages - window_radius - 1: start_p = max(0, total_pages - 5)
+    # Keep the window width constant near edges
+    if current_page < window_radius:
+        end_p = min(total_pages, 5)
+    elif current_page > total_pages - window_radius - 1:
+        start_p = max(0, total_pages - 5)
 
     num_page_buttons = end_p - start_p
     if num_page_buttons < 1: return
 
-    # Render Buttons
+    # 4. Render Buttons
     cols = st.columns([1] + [1] * num_page_buttons + [1])
     
-    # Prev
+    # PREV
     with cols[0]:
-        st.button("◀", disabled=(current_page == 0), on_click=cb_change_page, args=(-1,), key=f"prev_{key_suffix}", use_container_width=True)
+        st.button("◀", disabled=(current_page == 0), 
+                  on_click=cb_change_page, args=(-1,), 
+                  key=f"prev_{key_suffix}", use_container_width=True)
     
-    # Numbered Buttons
+    # NUMBERED BUTTONS (1-BASED LABELS)
     for i, p_idx in enumerate(range(start_p, end_p)):
         with cols[i + 1]:
+            # Human readable label (Page 0 -> "1")
             label = str(p_idx + 1)
-            if p_idx in tagged_pages_set: label += " 🟢"
+            
+            # Green Dot Indicator
+            if p_idx in tagged_pages_set: 
+                label += " 🟢"
+            
+            # Highlight Active Page
             btn_type = "primary" if p_idx == current_page else "secondary"
-            st.button(label, type=btn_type, key=f"btn_p{p_idx}_{key_suffix}", use_container_width=True, on_click=cb_set_page, args=(p_idx,))
+            
+            st.button(label, type=btn_type, 
+                      key=f"btn_p{p_idx}_{key_suffix}", 
+                      use_container_width=True, 
+                      on_click=cb_set_page, args=(p_idx,))
 
-    # Next
+    # NEXT
     with cols[-1]:
-        st.button("▶", disabled=(current_page >= total_pages - 1), on_click=cb_change_page, args=(1,), key=f"next_{key_suffix}", use_container_width=True)
-
+        st.button("▶", disabled=(current_page >= total_pages - 1), 
+                  on_click=cb_change_page, args=(1,), 
+                  key=f"next_{key_suffix}", use_container_width=True)
 
 @st.fragment
 def render_gallery_grid(current_batch, quality, grid_cols, path_o):
