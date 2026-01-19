@@ -133,8 +133,19 @@ def render_sidebar_content(path_o):
             processed_cats.append(cat)
             last_char = current_char
 
-    # --- 2. STATE SYNC ---
-    if "t5_active_cat" not in st.session_state: st.session_state.t5_active_cat = cats[0] if cats else "Default"
+    # --- 2. INSTANT STATE SYNC (The Fix) ---
+    # We check the radio widget's state ('t5_radio_select') BEFORE rendering the grid.
+    # This ensures the grid sees the new selection immediately.
+    if "t5_radio_select" in st.session_state:
+        new_selection = st.session_state.t5_radio_select
+        # Only update if it's a valid category (ignore separators)
+        if not new_selection.startswith("---"):
+            st.session_state.t5_active_cat = new_selection
+
+    # Ensure default exists
+    if "t5_active_cat" not in st.session_state: 
+        st.session_state.t5_active_cat = cats[0] if cats else "Default"
+    
     current_cat = st.session_state.t5_active_cat
     
     # --- 3. VISUAL NUMBER GRID (1-25) ---
@@ -142,22 +153,19 @@ def render_sidebar_content(path_o):
         st.caption(f"Map: **{current_cat}**")
         
         # A. Build Index Map: { number: image_path }
-        # We check both Staging (Memory) and Output (Disk)
         index_map = {}
         
-        # 1. Check Staging
+        # Check Staging
         staged = SorterEngine.get_staged_data()
         for orig_path, info in staged.items():
             if info['cat'] == current_cat:
                 try:
-                    # Parse "Category_005.jpg" -> 5
                     parts = info['name'].rsplit('_', 1)
                     num_part = parts[1].split('.')[0]
-                    idx = int(num_part)
-                    index_map[idx] = orig_path # Store ORIGINAL source path for preview
+                    index_map[int(num_part)] = orig_path
                 except: pass
 
-        # 2. Check Disk (Output Folder)
+        # Check Disk
         cat_path = os.path.join(path_o, current_cat)
         if os.path.exists(cat_path):
             for f in os.listdir(cat_path):
@@ -166,37 +174,29 @@ def render_sidebar_content(path_o):
                         parts = f.rsplit('_', 1)
                         num_part = parts[1].split('.')[0]
                         idx = int(num_part)
-                        # Only add if not in staging (Staging overrides disk visually)
                         if idx not in index_map:
                             index_map[idx] = os.path.join(cat_path, f)
                     except: pass
         
-        # B. Render 5x5 Grid
+        # B. Render Grid
         grid_cols = st.columns(5, gap="small")
         for i in range(1, 26):
             is_used = i in index_map
             btn_type = "primary" if is_used else "secondary"
             
             with grid_cols[(i-1) % 5]:
-                # We handle the click logic manually here instead of a callback
-                # to trigger the dialog properly.
                 if st.button(f"{i}", key=f"grid_{i}", type=btn_type, use_container_width=True):
-                    # 1. Set the Index
                     st.session_state.t5_next_index = i
-                    
-                    # 2. If image exists, SHOW DIALOG
                     if is_used:
                         file_path = index_map[i]
                         view_tag_preview(file_path, f"{current_cat} #{i}")
                     else:
-                        # Optional: Just toast that it's set
                         st.toast(f"Next Index set to #{i}")
-                        
         st.divider()
 
     # --- 4. RADIO SELECTION ---
-    selection = st.radio("Active Tag", processed_cats, key="t5_radio_select")
-    if not selection.startswith("---"): st.session_state.t5_active_cat = selection
+    # We render the radio here, but its value was already used above!
+    st.radio("Active Tag", processed_cats, key="t5_radio_select")
 
     # --- 5. MANUAL INPUT ---
     st.caption("Tagging Settings")
@@ -206,7 +206,6 @@ def render_sidebar_content(path_o):
     c_num1.number_input("Next Number #", min_value=1, step=1, key="t5_next_index")
     
     if c_num2.button("🔄", help="Auto-detect next number"):
-        # Max used + 1
         used_indices = index_map.keys()
         next_val = max(used_indices) + 1 if used_indices else 1
         st.session_state.t5_next_index = next_val
