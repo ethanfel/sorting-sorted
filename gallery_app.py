@@ -178,8 +178,8 @@ def action_tag(img_path: str, manual_idx: Optional[int] = None):
     
     SorterEngine.stage_image(img_path, state.active_cat, name)
     
-    # Auto-increment only if using next_index
-    if manual_idx is None or manual_idx == state.next_index:
+    # Only auto-increment if we used the default next_index (not manual)
+    if manual_idx is None:
         state.next_index = idx + 1
     
     refresh_staged_info()
@@ -275,9 +275,20 @@ def render_sidebar():
                 
                 def make_click_handler(num: int):
                     def handler():
-                        state.next_index = num
                         if num in state.index_map:
-                            open_zoom_dialog(state.index_map[num], f"{state.active_cat} #{num}")
+                            # Number is used - open preview
+                            img_path = state.index_map[num]
+                            is_staged = img_path in state.staged_data
+                            open_zoom_dialog(
+                                img_path, 
+                                f"{state.active_cat} #{num}",
+                                show_untag=is_staged,
+                                show_jump=True
+                            )
+                        else:
+                            # Number is free - set as next index
+                            state.next_index = num
+                            render_sidebar()
                     return handler
                 
                 ui.button(str(i), on_click=make_click_handler(i)) \
