@@ -1,15 +1,17 @@
 import os
 import math
 import asyncio
-import json
+from typing import Optional, List, Dict, Set
 from nicegui import ui, app, run
 from fastapi import Response
 from engine import SorterEngine
 
 # ==========================================
-# 1. STATE MANAGEMENT
+# STATE MANAGEMENT
 # ==========================================
 class AppState:
+    """Centralized application state with lazy loading."""
+    
     def __init__(self):
         # Profile Data
         self.profiles = SorterEngine.load_profiles()
@@ -17,7 +19,6 @@ class AppState:
         if not self.profiles:
             self.profiles = {"Default": {"tab5_source": "/storage", "tab5_out": "/storage"}}
         
-        # Load initial paths
         self.load_active_profile()
         
         # View Settings
@@ -35,140 +36,196 @@ class AppState:
         self.cleanup_mode = "Keep"
         
         # Data Caches
-        self.all_images = []
-        self.staged_data = {}
-        self.green_dots = set()
-        self.index_map = {} 
+        self.all_images: List[str] = []
+        self.staged_data: Dict = {}
+        self.green_dots: Set[int] = set()
+        self.index_map: Dict[int, str] = {}
+        
+        # UI Containers (populated later)
+        self.sidebar_container = None
+        self.grid_container = None
+        self.pagination_container = None
 
     def load_active_profile(self):
+        """Load paths from active profile."""
         p_data = self.profiles.get(self.profile_name, {})
         self.source_dir = p_data.get("tab5_source", "/storage")
         self.output_dir = p_data.get("tab5_out", "/storage")
 
     def save_current_profile(self):
+        """Save current paths to active profile."""
         if self.profile_name not in self.profiles:
             self.profiles[self.profile_name] = {}
         self.profiles[self.profile_name]["tab5_source"] = self.source_dir
         self.profiles[self.profile_name]["tab5_out"] = self.output_dir
         SorterEngine.save_tab_paths(self.profile_name, t5_s=self.source_dir, t5_o=self.output_dir)
-        ui.notify(f"Profile '{self.profile_name}' Saved!", type='positive')
+        ui.notify(f"Profile '{self.profile_name}' saved!", type='positive')
+
+    def get_categories(self) -> List[str]:
+        """Get list of categories, ensuring active_cat exists."""
+        cats = SorterEngine.get_categories() or ["Default"]
+        if self.active_cat not in cats:
+            self.active_cat = cats[0]
+        return cats
+
+    @property
+    def total_pages(self) -> int:
+        """Calculate total pages."""
+        return math.ceil(len(self.all_images) / self.page_size) if self.all_images else 0
+
+    def get_current_batch(self) -> List[str]:
+        """Get images for current page."""
+        if not self.all_images:
+            return []
+        start = self.page * self.page_size
+        return self.all_images[start : start + self.page_size]
 
 state = AppState()
 
 # ==========================================
-# 2. IMAGE SERVING API
+# IMAGE SERVING API
 # ==========================================
 
 @app.get('/thumbnail')
 async def get_thumbnail(path: str, size: int = 400, q: int = 50):
-    """Serves WebP thumbnail with dynamic quality."""
-    if not os.path.exists(path): return Response(status_code=404)
+    """Serve WebP thumbnail with dynamic quality."""
+    if not os.path.exists(path):
+        return Response(status_code=404)
     img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, q, size)
     return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
 
 @app.get('/full_res')
 async def get_full_res(path: str):
-    if not os.path.exists(path): return Response(status_code=404)
+    """Serve full resolution image."""
+    if not os.path.exists(path):
+        return Response(status_code=404)
     img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, 90, None)
-    return Response(content=img_bytes, media_type="image/webp")
+    return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
 
 # ==========================================
-# 3. CORE LOGIC
+# CORE LOGIC
 # ==========================================
 
 def load_images():
-    if os.path.exists(state.source_dir):
-        state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
-        total_pages = math.ceil(len(state.all_images) / state.page_size)
-        if state.page >= total_pages: state.page = 0
-        refresh_staged_info()
-        refresh_ui()
-    else:
+    """Load images from source directory."""
+    if not os.path.exists(state.source_dir):
         ui.notify(f"Source not found: {state.source_dir}", type='warning')
+        return
+    
+    state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
+    
+    # Reset page if out of bounds
+    if state.page >= state.total_pages:
+        state.page = 0
+    
+    refresh_staged_info()
+    refresh_ui()
 
 def refresh_staged_info():
+    """Update staged data and index maps."""
     state.staged_data = SorterEngine.get_staged_data()
     
-    # 1. Update Green Dots
+    # Update green dots (pages with staged images)
     state.green_dots.clear()
     staged_keys = set(state.staged_data.keys())
     for idx, img_path in enumerate(state.all_images):
         if img_path in staged_keys:
             state.green_dots.add(idx // state.page_size)
-            
-    # 2. Update Sidebar Index Map
+    
+    # Build index map for active category
     state.index_map.clear()
-    # Staging
+    
+    # Add staged images
     for orig_path, info in state.staged_data.items():
         if info['cat'] == state.active_cat:
-            try:
-                num = int(info['name'].rsplit('_', 1)[1].split('.')[0])
-                state.index_map[num] = orig_path 
-            except: pass
-    # Disk
+            idx = _extract_index(info['name'])
+            if idx is not None:
+                state.index_map[idx] = orig_path
+    
+    # Add committed images from disk
     cat_path = os.path.join(state.output_dir, state.active_cat)
     if os.path.exists(cat_path):
-        for f in os.listdir(cat_path):
-            if f.startswith(state.active_cat) and "_" in f:
-                try:
-                    num = int(f.rsplit('_', 1)[1].split('.')[0])
-                    if num not in state.index_map:
-                        state.index_map[num] = os.path.join(cat_path, f)
-                except: pass
+        for filename in os.listdir(cat_path):
+            if filename.startswith(state.active_cat):
+                idx = _extract_index(filename)
+                if idx is not None and idx not in state.index_map:
+                    state.index_map[idx] = os.path.join(cat_path, filename)
 
-def get_current_batch():
-    if not state.all_images: return []
-    start = state.page * state.page_size
-    return state.all_images[start : start + state.page_size]
+def _extract_index(filename: str) -> Optional[int]:
+    """Extract numeric index from filename (e.g., 'Cat_042.jpg' -> 42)."""
+    try:
+        return int(filename.rsplit('_', 1)[1].split('.')[0])
+    except (ValueError, IndexError):
+        return None
 
-# --- ACTIONS ---
+# ==========================================
+# ACTIONS
+# ==========================================
 
-def action_tag(img_path, manual_idx=None):
-    idx = manual_idx if manual_idx else state.next_index
+def action_tag(img_path: str, manual_idx: Optional[int] = None):
+    """Tag an image with category and index."""
+    idx = manual_idx if manual_idx is not None else state.next_index
     ext = os.path.splitext(img_path)[1]
     name = f"{state.active_cat}_{idx:03d}{ext}"
     
+    # Check for conflicts
     final_path = os.path.join(state.output_dir, state.active_cat, name)
     staged_names = {v['name'] for v in state.staged_data.values() if v['cat'] == state.active_cat}
     
     if name in staged_names or os.path.exists(final_path):
         ui.notify(f"Conflict: {name} exists. Using suffix.", type='warning')
         name = f"{state.active_cat}_{idx:03d}_{len(staged_names)+1}{ext}"
-
+    
     SorterEngine.stage_image(img_path, state.active_cat, name)
+    
+    # Auto-increment only if using next_index
     if manual_idx is None or manual_idx == state.next_index:
         state.next_index = idx + 1
-    refresh_staged_info(); refresh_ui()
+    
+    refresh_staged_info()
+    refresh_ui()
 
-def action_untag(img_path):
+def action_untag(img_path: str):
+    """Remove staging from an image."""
     SorterEngine.clear_staged_item(img_path)
-    refresh_staged_info(); refresh_ui()
+    refresh_staged_info()
+    refresh_ui()
 
-def action_delete(img_path):
+def action_delete(img_path: str):
+    """Delete image to trash."""
     SorterEngine.delete_to_trash(img_path)
-    load_images() 
+    load_images()
 
 def action_apply_page():
-    batch = get_current_batch()
-    if not batch: return
+    """Apply staged changes for current page only."""
+    batch = state.get_current_batch()
+    if not batch:
+        ui.notify("No images on current page", type='warning')
+        return
+    
     SorterEngine.commit_batch(batch, state.output_dir, state.cleanup_mode, state.batch_mode)
-    ui.notify(f"Page Processed ({state.batch_mode})", type='positive')
+    ui.notify(f"Page processed ({state.batch_mode})", type='positive')
     load_images()
 
-# --- FIX 2: ASYNC GLOBAL APPLY ---
 async def action_apply_global():
-    ui.notify("Starting Global Apply... This may take a while.")
-    # Must use 'await' with io_bound to actually wait for completion
-    await run.io_bound(SorterEngine.commit_global, state.output_dir, state.cleanup_mode, state.batch_mode, state.source_dir)
+    """Apply all staged changes globally."""
+    ui.notify("Starting global apply... This may take a while.", type='info')
+    await run.io_bound(
+        SorterEngine.commit_global,
+        state.output_dir,
+        state.cleanup_mode,
+        state.batch_mode,
+        state.source_dir
+    )
     load_images()
-    ui.notify("Global Apply Complete!", type='positive')
-
+    ui.notify("Global apply complete!", type='positive')
 
 # ==========================================
-# 4. UI RENDERERS
+# UI COMPONENTS
 # ==========================================
 
-def open_zoom_dialog(path, title=None):
+def open_zoom_dialog(path: str, title: Optional[str] = None):
+    """Open full-resolution image dialog."""
     with ui.dialog() as dialog, ui.card().classes('w-full max-w-screen-xl p-0 gap-0 bg-black'):
         with ui.row().classes('w-full justify-between items-center p-2 bg-gray-900 text-white'):
             ui.label(title or os.path.basename(path)).classes('font-bold truncate px-2')
@@ -177,187 +234,297 @@ def open_zoom_dialog(path, title=None):
     dialog.open()
 
 def render_sidebar():
-    sidebar_container.clear()
-    with sidebar_container:
+    """Render category management sidebar."""
+    state.sidebar_container.clear()
+    
+    with state.sidebar_container:
         ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2 text-white')
         
-        # --- FIX 1: SIDEBAR GRID CLICK ---
+        # Number grid (1-25)
         with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
-            
-            # Explicit function to handle the logic
-            def click_grid(num, used):
-                state.next_index = num
-                # Safety check: ensure number exists in map before opening
-                if used and num in state.index_map: 
-                    open_zoom_dialog(state.index_map[num], f"{state.active_cat} #{num}")
-                render_sidebar()
-
             for i in range(1, 26):
                 is_used = i in state.index_map
                 color = 'green' if is_used else 'grey-9'
                 
-                # LAMBDA FIX: Capture 'i' (n) and 'is_used' (u) properly. 
-                # Ignore the first arg 'e' (ClickEvent)
-                ui.button(str(i), on_click=lambda e, n=i, u=is_used: click_grid(n, u)) \
+                def make_click_handler(num: int):
+                    def handler():
+                        state.next_index = num
+                        if num in state.index_map:
+                            open_zoom_dialog(state.index_map[num], f"{state.active_cat} #{num}")
+                    return handler
+                
+                ui.button(str(i), on_click=make_click_handler(i)) \
                   .props(f'color={color} size=sm flat') \
                   .classes('w-full border border-gray-800')
         
-        # Category Select
-        categories = SorterEngine.get_categories() or ["Default"]
-        if state.active_cat not in categories: state.active_cat = categories[0]
-
-        ui.select(categories, value=state.active_cat, label="Active Category", 
-                  on_change=lambda e: (setattr(state, 'active_cat', e.value), refresh_staged_info(), render_sidebar())) \
-                  .classes('w-full').props('dark outlined')
-
-        # Add / Delete
+        # Category selector
+        categories = state.get_categories()
+        
+        def on_category_change(e):
+            state.active_cat = e.value
+            refresh_staged_info()
+            render_sidebar()
+        
+        ui.select(
+            categories,
+            value=state.active_cat,
+            label="Active Category",
+            on_change=on_category_change
+        ).classes('w-full').props('dark outlined')
+        
+        # Add new category
         with ui.row().classes('w-full items-center no-wrap mt-2'):
-            new_cat_input = ui.input(placeholder='New...').props('dense outlined dark').classes('flex-grow')
-            def add_it():
+            new_cat_input = ui.input(placeholder='New category...') \
+                .props('dense outlined dark').classes('flex-grow')
+            
+            def add_category():
                 if new_cat_input.value:
                     SorterEngine.add_category(new_cat_input.value)
                     state.active_cat = new_cat_input.value
-                    refresh_staged_info(); render_sidebar()
-            ui.button(icon='add', on_click=add_it).props('flat color=green')
-
+                    refresh_staged_info()
+                    render_sidebar()
+            
+            ui.button(icon='add', on_click=add_category).props('flat color=green')
+        
+        # Delete category
         with ui.expansion('Danger Zone', icon='warning').classes('w-full text-red-400 mt-2'):
-            ui.button('DELETE CAT', color='red', on_click=lambda: (SorterEngine.delete_category(state.active_cat), refresh_staged_info(), render_sidebar())).classes('w-full')
-
+            def delete_category():
+                SorterEngine.delete_category(state.active_cat)
+                refresh_staged_info()
+                render_sidebar()
+            
+            ui.button('DELETE CATEGORY', color='red', on_click=delete_category).classes('w-full')
+        
         ui.separator().classes('my-4 bg-gray-700')
-
-        # Counter
+        
+        # Index counter
         with ui.row().classes('w-full items-end no-wrap'):
-            ui.number(label="Next Index", min=1, precision=0).bind_value(state, 'next_index').classes('flex-grow').props('dark outlined')
-            ui.button('🔄', on_click=lambda: (setattr(state, 'next_index', (max(state.index_map.keys())+1 if state.index_map else 1)), render_sidebar())).props('flat color=white')
+            ui.number(label="Next Index", min=1, precision=0) \
+                .bind_value(state, 'next_index') \
+                .classes('flex-grow').props('dark outlined')
+            
+            def reset_index():
+                state.next_index = (max(state.index_map.keys()) + 1) if state.index_map else 1
+                render_sidebar()
+            
+            ui.button('🔄', on_click=reset_index).props('flat color=white')
 
 def render_gallery():
-    grid_container.clear()
-    batch = get_current_batch()
-    thumb_size = 800 
+    """Render image gallery grid."""
+    state.grid_container.clear()
+    batch = state.get_current_batch()
     
-    with grid_container:
+    with state.grid_container:
         with ui.grid(columns=state.grid_cols).classes('w-full gap-3'):
             for img_path in batch:
-                is_staged = img_path in state.staged_data
-                
-                with ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow'):
-                    # Header
-                    with ui.row().classes('w-full justify-between no-wrap mb-1'):
-                        ui.label(os.path.basename(img_path)[:15]).classes('text-xs text-gray-400 truncate')
-                        with ui.row().classes('gap-0'):
-                            ui.button(icon='zoom_in', on_click=lambda p=img_path: open_zoom_dialog(p)).props('flat size=sm dense color=white')
-                            ui.button(icon='delete', on_click=lambda p=img_path: action_delete(p)).props('flat size=sm dense color=red')
+                render_image_card(img_path)
 
-                    # Image
-                    ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
-                        .classes('w-full h-64 bg-black rounded') \
-                        .props('fit=contain no-spinner')
-                    
-                    # Actions
-                    if is_staged:
-                        info = state.staged_data[img_path]
-                        try: num = info['name'].rsplit('_', 1)[1].split('.')[0]
-                        except: num = "?"
-                        ui.label(f"🏷️ {info['cat']}").classes('text-center text-green-400 text-xs py-1 w-full')
-                        ui.button(f"Untag (#{num})", on_click=lambda p=img_path: action_untag(p)).props('flat color=grey-5 dense').classes('w-full')
-                    else:
-                        with ui.row().classes('w-full no-wrap mt-2 gap-1'):
-                            local_idx = ui.number(value=state.next_index, precision=0).props('dense dark outlined').classes('w-1/3')
-                            ui.button('Tag', on_click=lambda p=img_path, i=local_idx: action_tag(p, int(i.value))).classes('w-2/3').props('color=green dense')
+def render_image_card(img_path: str):
+    """Render individual image card."""
+    is_staged = img_path in state.staged_data
+    thumb_size = 800
+    
+    with ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow'):
+        # Header with filename and actions
+        with ui.row().classes('w-full justify-between no-wrap mb-1'):
+            ui.label(os.path.basename(img_path)[:15]).classes('text-xs text-gray-400 truncate')
+            with ui.row().classes('gap-0'):
+                ui.button(
+                    icon='zoom_in',
+                    on_click=lambda p=img_path: open_zoom_dialog(p)
+                ).props('flat size=sm dense color=white')
+                ui.button(
+                    icon='delete',
+                    on_click=lambda p=img_path: action_delete(p)
+                ).props('flat size=sm dense color=red')
+        
+        # Thumbnail
+        ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
+            .classes('w-full h-64 bg-black rounded') \
+            .props('fit=contain no-spinner')
+        
+        # Tagging UI
+        if is_staged:
+            info = state.staged_data[img_path]
+            idx = _extract_index(info['name'])
+            idx_str = str(idx) if idx else "?"
+            ui.label(f"🏷️ {info['cat']}").classes('text-center text-green-400 text-xs py-1 w-full')
+            ui.button(
+                f"Untag (#{idx_str})",
+                on_click=lambda p=img_path: action_untag(p)
+            ).props('flat color=grey-5 dense').classes('w-full')
+        else:
+            with ui.row().classes('w-full no-wrap mt-2 gap-1'):
+                local_idx = ui.number(value=state.next_index, precision=0) \
+                    .props('dense dark outlined').classes('w-1/3')
+                ui.button(
+                    'Tag',
+                    on_click=lambda p=img_path, i=local_idx: action_tag(p, int(i.value))
+                ).classes('w-2/3').props('color=green dense')
 
 def render_pagination():
-    pagination_container.clear()
-    if not state.all_images: return
+    """Render pagination controls."""
+    state.pagination_container.clear()
     
-    total_pages = math.ceil(len(state.all_images) / state.page_size)
-    if total_pages <= 1: return
-
-    with pagination_container:
-        # Slider
-        ui.slider(min=0, max=total_pages-1, value=state.page, on_change=lambda e: set_page(int(e.value))).classes('w-1/2 mb-2').props('color=green')
-
-        # Buttons
+    if state.total_pages <= 1:
+        return
+    
+    with state.pagination_container:
+        # Page slider
+        ui.slider(
+            min=0,
+            max=state.total_pages - 1,
+            value=state.page,
+            on_change=lambda e: set_page(int(e.value))
+        ).classes('w-1/2 mb-2').props('color=green')
+        
+        # Page buttons
         with ui.row().classes('items-center gap-2'):
-            ui.button('◀', on_click=lambda: set_page(state.page - 1)).props('flat color=white').bind_visibility_from(state, 'page', backward=lambda x: x > 0)
+            # Previous button
+            if state.page > 0:
+                ui.button('◀', on_click=lambda: set_page(state.page - 1)).props('flat color=white')
             
+            # Page numbers (show current ±2)
             start = max(0, state.page - 2)
-            end = min(total_pages, state.page + 3)
+            end = min(state.total_pages, state.page + 3)
+            
             for p in range(start, end):
                 dot = " 🟢" if p in state.green_dots else ""
                 color = "white" if p == state.page else "grey-6"
-                ui.button(f"{p+1}{dot}", on_click=lambda p=p: set_page(p)).props(f'flat color={color}')
-                
-            ui.button('▶', on_click=lambda: set_page(state.page + 1)).props('flat color=white').bind_visibility_from(state, 'page', backward=lambda x: x < total_pages - 1)
+                ui.button(
+                    f"{p+1}{dot}",
+                    on_click=lambda page=p: set_page(page)
+                ).props(f'flat color={color}')
+            
+            # Next button
+            if state.page < state.total_pages - 1:
+                ui.button('▶', on_click=lambda: set_page(state.page + 1)).props('flat color=white')
 
-def set_page(p):
-    state.page = p; refresh_ui()
+def set_page(p: int):
+    """Navigate to specific page."""
+    state.page = max(0, min(p, state.total_pages - 1))
+    refresh_ui()
 
 def refresh_ui():
-    render_sidebar(); render_pagination(); render_gallery()
+    """Refresh all UI components."""
+    render_sidebar()
+    render_pagination()
+    render_gallery()
 
-def handle_key(e):
-    if not e.action.keydown: return
-    if e.key.arrow_left: set_page(max(0, state.page - 1))
-    if e.key.arrow_right: 
-        total = math.ceil(len(state.all_images) / state.page_size)
-        set_page(min(total - 1, state.page + 1))
-
-# ==========================================
-# 5. MAIN LAYOUT
-# ==========================================
-
-with ui.header().classes('items-center bg-slate-900 text-white border-b border-gray-700').style('height: 70px'):
-    with ui.row().classes('w-full items-center gap-4 no-wrap px-4'):
-        ui.label('🖼️ NiceSorter').classes('text-xl font-bold shrink-0 text-green-400')
-        
-        # Profile Select
-        profile_names = list(state.profiles.keys())
-        def change_profile(e):
-            state.profile_name = e.value; state.load_active_profile(); load_images()
-        ui.select(profile_names, value=state.profile_name, on_change=change_profile).props('dark dense options-dense borderless').classes('w-32')
-        
-        # Paths
-        with ui.row().classes('flex-grow gap-2'):
-            ui.input('Source').bind_value(state, 'source_dir').classes('flex-grow').props('dark dense outlined')
-            ui.input('Output').bind_value(state, 'output_dir').classes('flex-grow').props('dark dense outlined')
-            
-        ui.button(icon='save', on_click=state.save_current_profile).props('flat round color=white')
-        ui.button('LOAD', on_click=load_images).props('color=green flat').classes('font-bold border border-green-700')
-        
-        # View Menu
-        with ui.button(icon='tune', color='white').props('flat round'):
-            with ui.menu().classes('bg-gray-800 text-white p-4'):
-                ui.label('VIEW SETTINGS').classes('text-xs font-bold mb-2')
-                ui.label('Grid Columns:')
-                ui.slider(min=2, max=8, step=1, value=state.grid_cols, on_change=lambda e: (setattr(state, 'grid_cols', e.value), refresh_ui())).props('color=green')
-                ui.label('Preview Quality:')
-                ui.slider(min=10, max=100, step=10, value=state.preview_quality, on_change=lambda e: (setattr(state, 'preview_quality', e.value), refresh_ui())).props('color=green label-always')
-
-        ui.switch('Dark', value=True, on_change=lambda e: ui.dark_mode().set_value(e.value)).props('color=green')
-
-with ui.left_drawer(value=True).classes('bg-gray-950 p-4 border-r border-gray-800').props('width=320'):
-    sidebar_container = ui.column().classes('w-full')
-
-with ui.column().classes('w-full p-6 bg-gray-900 min-h-screen text-white'):
-    pagination_container = ui.column().classes('w-full items-center mb-4')
-    grid_container = ui.column().classes('w-full')
+def handle_keyboard(e):
+    """Handle keyboard navigation."""
+    if not e.action.keydown:
+        return
     
-    # Footer
-    ui.separator().classes('my-10 bg-gray-800')
-    with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
-        with ui.column():
-            ui.label('TAGGED FILES:').classes('text-gray-500 text-xs font-bold')
-            ui.radio(['Copy', 'Move'], value=state.batch_mode).bind_value(state, 'batch_mode').props('inline dark color=green')
-        with ui.column():
-            ui.label('UNTAGGED FILES:').classes('text-gray-500 text-xs font-bold')
-            ui.radio(['Keep', 'Move to Unused', 'Delete'], value=state.cleanup_mode).bind_value(state, 'cleanup_mode').props('inline dark color=green')
-        with ui.row().classes('items-center gap-6'):
-            ui.button('APPLY PAGE', on_click=action_apply_page).props('outline color=white lg')
-            with ui.column().classes('items-center'):
-                ui.button('APPLY GLOBAL', on_click=action_apply_global).props('lg color=red-900')
-                ui.label('(Process All)').classes('text-xs text-gray-500')
+    if e.key.arrow_left and state.page > 0:
+        set_page(state.page - 1)
+    elif e.key.arrow_right and state.page < state.total_pages - 1:
+        set_page(state.page + 1)
 
-ui.keyboard(on_key=handle_key)
+# ==========================================
+# MAIN LAYOUT
+# ==========================================
+
+def build_header():
+    """Build application header."""
+    with ui.header().classes('items-center bg-slate-900 text-white border-b border-gray-700').style('height: 70px'):
+        with ui.row().classes('w-full items-center gap-4 no-wrap px-4'):
+            ui.label('🖼️ NiceSorter').classes('text-xl font-bold shrink-0 text-green-400')
+            
+            # Profile selector
+            profile_names = list(state.profiles.keys())
+            
+            def change_profile(e):
+                state.profile_name = e.value
+                state.load_active_profile()
+                load_images()
+            
+            ui.select(profile_names, value=state.profile_name, on_change=change_profile) \
+                .props('dark dense options-dense borderless').classes('w-32')
+            
+            # Source and output paths
+            with ui.row().classes('flex-grow gap-2'):
+                ui.input('Source').bind_value(state, 'source_dir') \
+                    .classes('flex-grow').props('dark dense outlined')
+                ui.input('Output').bind_value(state, 'output_dir') \
+                    .classes('flex-grow').props('dark dense outlined')
+            
+            ui.button(icon='save', on_click=state.save_current_profile) \
+                .props('flat round color=white')
+            ui.button('LOAD', on_click=load_images) \
+                .props('color=green flat').classes('font-bold border border-green-700')
+            
+            # View settings menu
+            with ui.button(icon='tune', color='white').props('flat round'):
+                with ui.menu().classes('bg-gray-800 text-white p-4'):
+                    ui.label('VIEW SETTINGS').classes('text-xs font-bold mb-2')
+                    
+                    ui.label('Grid Columns:')
+                    ui.slider(
+                        min=2, max=8, step=1,
+                        value=state.grid_cols,
+                        on_change=lambda e: (setattr(state, 'grid_cols', e.value), refresh_ui())
+                    ).props('color=green')
+                    
+                    ui.label('Preview Quality:')
+                    ui.slider(
+                        min=10, max=100, step=10,
+                        value=state.preview_quality,
+                        on_change=lambda e: (setattr(state, 'preview_quality', e.value), refresh_ui())
+                    ).props('color=green label-always')
+            
+            ui.switch('Dark', value=True, on_change=lambda e: ui.dark_mode().set_value(e.value)) \
+                .props('color=green')
+
+def build_sidebar():
+    """Build left sidebar."""
+    with ui.left_drawer(value=True).classes('bg-gray-950 p-4 border-r border-gray-800').props('width=320'):
+        state.sidebar_container = ui.column().classes('w-full')
+
+def build_main_content():
+    """Build main content area."""
+    with ui.column().classes('w-full p-6 bg-gray-900 min-h-screen text-white'):
+        state.pagination_container = ui.column().classes('w-full items-center mb-4')
+        state.grid_container = ui.column().classes('w-full')
+        
+        # Footer with batch controls
+        ui.separator().classes('my-10 bg-gray-800')
+        
+        with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
+            # Tagged files mode
+            with ui.column():
+                ui.label('TAGGED FILES:').classes('text-gray-500 text-xs font-bold')
+                ui.radio(['Copy', 'Move'], value=state.batch_mode) \
+                    .bind_value(state, 'batch_mode') \
+                    .props('inline dark color=green')
+            
+            # Untagged files mode
+            with ui.column():
+                ui.label('UNTAGGED FILES:').classes('text-gray-500 text-xs font-bold')
+                ui.radio(['Keep', 'Move to Unused', 'Delete'], value=state.cleanup_mode) \
+                    .bind_value(state, 'cleanup_mode') \
+                    .props('inline dark color=green')
+            
+            # Action buttons
+            with ui.row().classes('items-center gap-6'):
+                ui.button('APPLY PAGE', on_click=action_apply_page) \
+                    .props('outline color=white lg')
+                
+                with ui.column().classes('items-center'):
+                    ui.button('APPLY GLOBAL', on_click=action_apply_global) \
+                        .props('lg color=red-900')
+                    ui.label('(Process All)').classes('text-xs text-gray-500')
+
+# ==========================================
+# INITIALIZATION
+# ==========================================
+
+build_header()
+build_sidebar()
+build_main_content()
+
+ui.keyboard(on_key=handle_keyboard)
 ui.dark_mode().enable()
 load_images()
-ui.run(title="Nice Sorter", host="0.0.0.0", port=8080, reload=False)
+
+ui.run(title="NiceSorter", host="0.0.0.0", port=8080, reload=False)
