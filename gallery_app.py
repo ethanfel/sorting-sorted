@@ -506,11 +506,11 @@ def build_header():
             # Source and output paths
             with ui.row().classes('flex-grow gap-2'):
                 ui.input('Input Base').bind_value(state, 'input_base') \
-                    .classes('w-48').props('dark dense outlined')
+                    .classes('flex-grow').props('dark dense outlined')
                 ui.input('Output Base').bind_value(state, 'output_base') \
-                    .classes('w-48').props('dark dense outlined')
+                    .classes('flex-grow').props('dark dense outlined')
                 ui.input('Folder (optional)').bind_value(state, 'folder_name') \
-                    .classes('w-32').props('dark dense outlined')
+                    .classes('flex-grow').props('dark dense outlined')
             
             ui.button(icon='save', on_click=state.save_current_profile) \
                 .props('flat round color=white')
