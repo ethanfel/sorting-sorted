@@ -114,6 +114,11 @@ def load_images():
     
     state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
     
+    # Restore previously saved tags for this folder
+    restored = SorterEngine.restore_folder_tags(state.source_dir, state.all_images)
+    if restored > 0:
+        ui.notify(f"Restored {restored} tags from previous session", type='info')
+    
     # Reset page if out of bounds
     if state.page >= state.total_pages:
         state.page = 0
