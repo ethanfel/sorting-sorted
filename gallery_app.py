@@ -49,16 +49,31 @@ class AppState:
     def load_active_profile(self):
         """Load paths from active profile."""
         p_data = self.profiles.get(self.profile_name, {})
-        self.source_dir = p_data.get("tab5_source", "/storage")
-        self.output_dir = p_data.get("tab5_out", "/storage")
+        self.input_base = p_data.get("tab5_source", "/storage")
+        self.output_base = p_data.get("tab5_out", "/storage")
+        self.folder_name = ""
+
+    @property
+    def source_dir(self):
+        """Computed source path: input_base/folder_name or just input_base."""
+        if self.folder_name:
+            return os.path.join(self.input_base, self.folder_name)
+        return self.input_base
+
+    @property
+    def output_dir(self):
+        """Computed output path: output_base/folder_name or just output_base."""
+        if self.folder_name:
+            return os.path.join(self.output_base, self.folder_name)
+        return self.output_base
 
     def save_current_profile(self):
         """Save current paths to active profile."""
         if self.profile_name not in self.profiles:
             self.profiles[self.profile_name] = {}
-        self.profiles[self.profile_name]["tab5_source"] = self.source_dir
-        self.profiles[self.profile_name]["tab5_out"] = self.output_dir
-        SorterEngine.save_tab_paths(self.profile_name, t5_s=self.source_dir, t5_o=self.output_dir)
+        self.profiles[self.profile_name]["tab5_source"] = self.input_base
+        self.profiles[self.profile_name]["tab5_out"] = self.output_base
+        SorterEngine.save_tab_paths(self.profile_name, t5_s=self.input_base, t5_o=self.output_base)
         ui.notify(f"Profile '{self.profile_name}' saved!", type='positive')
 
     def get_categories(self) -> List[str]:
@@ -490,10 +505,12 @@ def build_header():
             
             # Source and output paths
             with ui.row().classes('flex-grow gap-2'):
-                ui.input('Source').bind_value(state, 'source_dir') \
-                    .classes('flex-grow').props('dark dense outlined')
-                ui.input('Output').bind_value(state, 'output_dir') \
-                    .classes('flex-grow').props('dark dense outlined')
+                ui.input('Input Base').bind_value(state, 'input_base') \
+                    .classes('w-48').props('dark dense outlined')
+                ui.input('Output Base').bind_value(state, 'output_base') \
+                    .classes('w-48').props('dark dense outlined')
+                ui.input('Folder (optional)').bind_value(state, 'folder_name') \
+                    .classes('w-32').props('dark dense outlined')
             
             ui.button(icon='save', on_click=state.save_current_profile) \
                 .props('flat round color=white')
