@@ -574,52 +574,57 @@ class SorterEngine:
         Call this when loading/reloading a folder.
         Returns the number of tags restored.
         """
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        # Ensure table exists (for existing databases)
-        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-             PRIMARY KEY (folder_path, filename))''')
-        
-        # Get saved tags for this folder
-        cursor.execute(
-            "SELECT filename, category, tag_index FROM folder_tags WHERE folder_path = ?",
-            (folder_path,)
-        )
-        saved_tags = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
-        
-        if not saved_tags:
+        try:
+            conn = sqlite3.connect(SorterEngine.DB_PATH)
+            cursor = conn.cursor()
+            
+            # Ensure table exists (for existing databases)
+            cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
+                (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+                 PRIMARY KEY (folder_path, filename))''')
+            conn.commit()
+            
+            # Get saved tags for this folder
+            cursor.execute(
+                "SELECT filename, category, tag_index FROM folder_tags WHERE folder_path = ?",
+                (folder_path,)
+            )
+            saved_tags = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
+            
+            if not saved_tags:
+                conn.close()
+                return 0
+            
+            # Build a map of filename -> full path from current images
+            filename_to_path = {}
+            for img_path in all_images:
+                fname = os.path.basename(img_path)
+                # Only map files that haven't been mapped yet (handles duplicates by using first occurrence)
+                if fname not in filename_to_path:
+                    filename_to_path[fname] = img_path
+            
+            # Restore tags to staging area
+            restored = 0
+            for filename, tag_info in saved_tags.items():
+                if filename in filename_to_path:
+                    full_path = filename_to_path[filename]
+                    # Check if not already staged
+                    cursor.execute("SELECT 1 FROM staging_area WHERE original_path = ?", (full_path,))
+                    if not cursor.fetchone():
+                        ext = os.path.splitext(filename)[1]
+                        new_name = f"{tag_info['cat']}_{tag_info['index']:03d}{ext}"
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)",
+                            (full_path, tag_info['cat'], new_name)
+                        )
+                        restored += 1
+            
+            conn.commit()
             conn.close()
+            return restored
+        except Exception as e:
+            print(f"Error restoring folder tags: {e}")
             return 0
-        
-        # Build a map of filename -> full path from current images
-        filename_to_path = {}
-        for img_path in all_images:
-            fname = os.path.basename(img_path)
-            # Only map files that haven't been mapped yet (handles duplicates by using first occurrence)
-            if fname not in filename_to_path:
-                filename_to_path[fname] = img_path
-        
-        # Restore tags to staging area
-        restored = 0
-        for filename, tag_info in saved_tags.items():
-            if filename in filename_to_path:
-                full_path = filename_to_path[filename]
-                # Check if not already staged
-                cursor.execute("SELECT 1 FROM staging_area WHERE original_path = ?", (full_path,))
-                if not cursor.fetchone():
-                    ext = os.path.splitext(filename)[1]
-                    new_name = f"{tag_info['cat']}_{tag_info['index']:03d}{ext}"
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)",
-                        (full_path, tag_info['cat'], new_name)
-                    )
-                    restored += 1
-        
-        conn.commit()
-        conn.close()
-        return restored
 
     @staticmethod
     def clear_folder_tags(folder_path):
