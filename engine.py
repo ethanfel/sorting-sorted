@@ -247,6 +247,15 @@ class SorterEngine:
         conn.close()
 
     @staticmethod
+    def clear_staging_area():
+        """Clears all items from the staging area."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM staging_area")
+        conn.commit()
+        conn.close()
+
+    @staticmethod
     def get_staged_data():
         """Retrieves current tagged/staged images."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
