@@ -35,7 +35,7 @@ class SorterEngine:
         # Seed categories if empty
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
-            for cat in ["_TRASH", "Default", "Action", "Solo"]:
+            for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
                 cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (cat,))
         
         conn.commit()
