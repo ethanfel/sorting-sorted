@@ -112,6 +112,9 @@ def load_images():
         ui.notify(f"Source not found: {state.source_dir}", type='warning')
         return
     
+    # Clear staging area when loading a new folder
+    SorterEngine.clear_staging_area()
+    
     state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
     
     # Restore previously saved tags for this folder
