@@ -578,7 +578,18 @@ class SorterEngine:
             conn = sqlite3.connect(SorterEngine.DB_PATH)
             cursor = conn.cursor()
             
-            # Ensure table exists (for existing databases)
+            # Check if table exists and has correct schema
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='folder_tags'")
+            if cursor.fetchone():
+                # Table exists - check if it has the filename column
+                cursor.execute("PRAGMA table_info(folder_tags)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'filename' not in columns:
+                    # Wrong schema - drop and recreate
+                    cursor.execute("DROP TABLE folder_tags")
+                    conn.commit()
+            
+            # Create table with correct schema
             cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
                 (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
                  PRIMARY KEY (folder_path, filename))''')
