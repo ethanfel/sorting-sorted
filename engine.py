@@ -540,6 +540,11 @@ class SorterEngine:
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         
+        # Ensure table exists (for existing databases)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
+            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+             PRIMARY KEY (folder_path, filename))''')
+        
         saved_count = 0
         for orig_path, info in staged.items():
             # Only save tags for files that are in this folder (or subfolders)
@@ -571,6 +576,11 @@ class SorterEngine:
         """
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
+        
+        # Ensure table exists (for existing databases)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
+            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+             PRIMARY KEY (folder_path, filename))''')
         
         # Get saved tags for this folder
         cursor.execute(
