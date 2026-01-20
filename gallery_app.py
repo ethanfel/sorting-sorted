@@ -224,12 +224,39 @@ async def action_apply_global():
 # UI COMPONENTS
 # ==========================================
 
-def open_zoom_dialog(path: str, title: Optional[str] = None):
-    """Open full-resolution image dialog."""
+def open_zoom_dialog(path: str, title: Optional[str] = None, show_untag: bool = False, show_jump: bool = False):
+    """Open full-resolution image dialog with optional actions."""
     with ui.dialog() as dialog, ui.card().classes('w-full max-w-screen-xl p-0 gap-0 bg-black'):
         with ui.row().classes('w-full justify-between items-center p-2 bg-gray-900 text-white'):
             ui.label(title or os.path.basename(path)).classes('font-bold truncate px-2')
-            ui.button(icon='close', on_click=dialog.close).props('flat round dense color=white')
+            
+            with ui.row().classes('gap-2'):
+                # Jump to page button
+                if show_jump and path in state.all_images:
+                    def jump_to_image():
+                        img_idx = state.all_images.index(path)
+                        target_page = img_idx // state.page_size
+                        dialog.close()
+                        set_page(target_page)
+                        ui.notify(f"Jumped to page {target_page + 1}", type='info')
+                    
+                    ui.button(icon='location_searching', on_click=jump_to_image) \
+                        .props('flat round dense color=blue') \
+                        .tooltip('Jump to image location')
+                
+                # Untag button
+                if show_untag:
+                    def untag_and_close():
+                        action_untag(path)
+                        dialog.close()
+                        ui.notify("Tag removed", type='positive')
+                    
+                    ui.button(icon='label_off', on_click=untag_and_close) \
+                        .props('flat round dense color=red') \
+                        .tooltip('Remove tag')
+                
+                ui.button(icon='close', on_click=dialog.close).props('flat round dense color=white')
+        
         ui.image(f"/full_res?path={path}").classes('w-full h-auto object-contain max-h-[85vh]')
     dialog.open()
 
