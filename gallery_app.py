@@ -28,7 +28,7 @@ class AppState:
         self.preview_quality = 50 
         
         # Tagging State
-        self.active_cat = "Default"
+        self.active_cat = "control"
         self.next_index = 1
         
         # Batch Settings
