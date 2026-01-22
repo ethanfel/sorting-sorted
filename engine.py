@@ -27,10 +27,15 @@ class SorterEngine:
         cursor.execute('''CREATE TABLE IF NOT EXISTS processed_log 
             (source_path TEXT PRIMARY KEY, category TEXT, action_type TEXT)''')
         
+        # --- NEW: FOLDER TAGS TABLE (persists tags by folder) ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
+            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+             PRIMARY KEY (folder_path, filename))''')
+        
         # Seed categories if empty
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
-            for cat in ["_TRASH", "Default", "Action", "Solo"]:
+            for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
                 cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (cat,))
         
         conn.commit()
@@ -242,6 +247,15 @@ class SorterEngine:
         conn.close()
 
     @staticmethod
+    def clear_staging_area():
+        """Clears all items from the staging area."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM staging_area")
+        conn.commit()
+        conn.close()
+
+    @staticmethod
     def get_staged_data():
         """Retrieves current tagged/staged images."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
@@ -256,6 +270,11 @@ class SorterEngine:
     def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None):
         """Commits ALL staged files and fixes permissions."""
         data = SorterEngine.get_staged_data()
+        
+        # Save folder tags BEFORE processing (so we can restore them later)
+        if source_root:
+            SorterEngine.save_folder_tags(source_root)
+        
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         
@@ -514,3 +533,137 @@ class SorterEngine:
             if img_path in staged_keys:
                 tagged_pages.add(idx // page_size)
         return tagged_pages
+
+    # --- 7. FOLDER TAG PERSISTENCE ---
+    @staticmethod
+    def save_folder_tags(folder_path):
+        """
+        Saves current staging data associated with a folder for later restoration.
+        Call this BEFORE clearing the staging area.
+        """
+        import re
+        staged = SorterEngine.get_staged_data()
+        if not staged:
+            return 0
+        
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        
+        # Ensure table exists (for existing databases)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
+            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+             PRIMARY KEY (folder_path, filename))''')
+        
+        saved_count = 0
+        for orig_path, info in staged.items():
+            # Only save tags for files that are in this folder (or subfolders)
+            if orig_path.startswith(folder_path):
+                filename = os.path.basename(orig_path)
+                category = info['cat']
+                
+                # Extract index from the new_name (e.g., "Action_042.jpg" -> 42)
+                new_name = info['name']
+                match = re.search(r'_(\d+)', new_name)
+                tag_index = int(match.group(1)) if match else 0
+                
+                cursor.execute(
+                    "INSERT OR REPLACE INTO folder_tags VALUES (?, ?, ?, ?)",
+                    (folder_path, filename, category, tag_index)
+                )
+                saved_count += 1
+        
+        conn.commit()
+        conn.close()
+        return saved_count
+
+    @staticmethod
+    def restore_folder_tags(folder_path, all_images):
+        """
+        Restores previously saved tags for a folder back into the staging area.
+        Call this when loading/reloading a folder.
+        Returns the number of tags restored.
+        """
+        try:
+            conn = sqlite3.connect(SorterEngine.DB_PATH)
+            cursor = conn.cursor()
+            
+            # Check if table exists and has correct schema
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='folder_tags'")
+            if cursor.fetchone():
+                # Table exists - check if it has the filename column
+                cursor.execute("PRAGMA table_info(folder_tags)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'filename' not in columns:
+                    # Wrong schema - drop and recreate
+                    cursor.execute("DROP TABLE folder_tags")
+                    conn.commit()
+            
+            # Create table with correct schema
+            cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
+                (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+                 PRIMARY KEY (folder_path, filename))''')
+            conn.commit()
+            
+            # Get saved tags for this folder
+            cursor.execute(
+                "SELECT filename, category, tag_index FROM folder_tags WHERE folder_path = ?",
+                (folder_path,)
+            )
+            saved_tags = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
+            
+            if not saved_tags:
+                conn.close()
+                return 0
+            
+            # Build a map of filename -> full path from current images
+            filename_to_path = {}
+            for img_path in all_images:
+                fname = os.path.basename(img_path)
+                # Only map files that haven't been mapped yet (handles duplicates by using first occurrence)
+                if fname not in filename_to_path:
+                    filename_to_path[fname] = img_path
+            
+            # Restore tags to staging area
+            restored = 0
+            for filename, tag_info in saved_tags.items():
+                if filename in filename_to_path:
+                    full_path = filename_to_path[filename]
+                    # Check if not already staged
+                    cursor.execute("SELECT 1 FROM staging_area WHERE original_path = ?", (full_path,))
+                    if not cursor.fetchone():
+                        ext = os.path.splitext(filename)[1]
+                        new_name = f"{tag_info['cat']}_{tag_info['index']:03d}{ext}"
+                        cursor.execute(
+                            "INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)",
+                            (full_path, tag_info['cat'], new_name)
+                        )
+                        restored += 1
+            
+            conn.commit()
+            conn.close()
+            return restored
+        except Exception as e:
+            print(f"Error restoring folder tags: {e}")
+            return 0
+
+    @staticmethod
+    def clear_folder_tags(folder_path):
+        """Clears saved tags for a specific folder."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM folder_tags WHERE folder_path = ?", (folder_path,))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_saved_folder_tags(folder_path):
+        """Returns saved tags for a folder (for debugging/display)."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT filename, category, tag_index FROM folder_tags WHERE folder_path = ?",
+            (folder_path,)
+        )
+        result = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
+        conn.close()
+        return result
