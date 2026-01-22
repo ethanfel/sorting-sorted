@@ -504,35 +504,39 @@ def build_header():
             ).props('dark dense options-dense borderless').classes('w-32')
             
             def add_profile():
-                async def create():
-                    name = await dialog
-                    if name and name not in state.profiles:
-                        state.profiles[name] = {"tab5_source": "/storage", "tab5_out": "/storage"}
-                        state.profile_name = name
-                        state.load_active_profile()
-                        profile_select.options = list(state.profiles.keys())
-                        profile_select.value = name
-                        ui.notify(f"Profile '{name}' created", type='positive')
-                
                 with ui.dialog() as dialog, ui.card().classes('p-4'):
                     ui.label('New Profile Name').classes('font-bold')
                     name_input = ui.input(placeholder='Profile name').props('autofocus')
+                    
+                    def do_create():
+                        name = name_input.value
+                        if name and name not in state.profiles:
+                            state.profiles[name] = {"tab5_source": "/storage", "tab5_out": "/storage"}
+                            SorterEngine.save_tab_paths(name, t5_s="/storage", t5_o="/storage")
+                            state.profile_name = name
+                            state.load_active_profile()
+                            dialog.close()
+                            ui.notify(f"Profile '{name}' created", type='positive')
+                            # Rebuild header to update profile list
+                            ui.navigate.reload()
+                        elif name in state.profiles:
+                            ui.notify("Profile already exists", type='warning')
+                    
                     with ui.row().classes('w-full justify-end gap-2 mt-2'):
-                        ui.button('Cancel', on_click=lambda: dialog.submit(None)).props('flat')
-                        ui.button('Create', on_click=lambda: dialog.submit(name_input.value)).props('color=green')
-                asyncio.create_task(create())
+                        ui.button('Cancel', on_click=dialog.close).props('flat')
+                        ui.button('Create', on_click=do_create).props('color=green')
+                dialog.open()
             
             def delete_profile():
                 if len(state.profiles) <= 1:
                     ui.notify("Cannot delete the last profile", type='warning')
                     return
+                deleted_name = state.profile_name
                 del state.profiles[state.profile_name]
                 state.profile_name = list(state.profiles.keys())[0]
                 state.load_active_profile()
-                profile_select.options = list(state.profiles.keys())
-                profile_select.value = state.profile_name
-                load_images()
-                ui.notify("Profile deleted", type='info')
+                ui.notify(f"Profile '{deleted_name}' deleted", type='info')
+                ui.navigate.reload()
             
             ui.button(icon='add', on_click=add_profile).props('flat round dense color=green').tooltip('New profile')
             ui.button(icon='delete', on_click=delete_profile).props('flat round dense color=red').tooltip('Delete profile')
