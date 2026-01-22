@@ -152,6 +152,12 @@ def load_images():
         ui.notify(f"Source not found: {state.source_dir}", type='warning')
         return
     
+    # Auto-save current tags before switching folders
+    if state.all_images and state.staged_data:
+        saved = SorterEngine.save_folder_tags(state.source_dir, state.profile_name)
+        if saved > 0:
+            ui.notify(f"Auto-saved {saved} tags", type='info')
+    
     # Clear staging area when loading a new folder
     SorterEngine.clear_staging_area()
     
@@ -306,6 +312,18 @@ def action_undo():
     
     refresh_staged_info()
     refresh_ui()
+
+def action_save_tags():
+    """Save current tags to database for later restoration."""
+    if not state.all_images:
+        ui.notify("No folder loaded", type='warning')
+        return
+    
+    saved = SorterEngine.save_folder_tags(state.source_dir, state.profile_name)
+    if saved > 0:
+        ui.notify(f"Saved {saved} tags", type='positive')
+    else:
+        ui.notify("No tags to save", type='info')
 
 def action_apply_page():
     """Apply staged changes for current page only."""
@@ -467,6 +485,7 @@ def render_sidebar():
                 ("0", "Tag with next index"),
                 ("U", "Untag hovered image"),
                 ("F", "Cycle filter (all/untagged/tagged)"),
+                ("Ctrl+S", "Save tags"),
                 ("Ctrl+Z", "Undo last action"),
                 ("Ctrl+1-5", "Switch category"),
                 ("← →", "Previous/Next page"),
@@ -568,6 +587,12 @@ def render_pagination():
                 )
             ).props(f'flat color={filter_colors[state.filter_mode]}').classes('ml-4')
             
+            # Save button
+            ui.button(
+                icon='save',
+                on_click=action_save_tags
+            ).props('flat color=blue').tooltip('Save tags (Ctrl+S)')
+            
             # Undo button
             ui.button(
                 icon='undo',
@@ -638,6 +663,10 @@ def handle_keyboard(e):
     elif key == 'z' and e.modifiers.ctrl:
         action_undo()
     
+    # Save (Ctrl+S)
+    elif key == 's' and e.modifiers.ctrl:
+        action_save_tags()
+    
     # Quick category switch (Ctrl+1 through Ctrl+5)
     elif e.modifiers.ctrl and key in '12345':
         cats = state.get_categories()
@@ -682,9 +711,14 @@ def build_header():
             
             # Profile selector with add/delete
             def change_profile(e):
+                # Auto-save before switching profile
+                if state.all_images and state.staged_data:
+                    SorterEngine.save_folder_tags(state.source_dir, state.profile_name)
+                
                 state.profile_name = e.value
                 state.load_active_profile()
                 state.active_cat = "control"  # Reset to default category
+                SorterEngine.clear_staging_area()  # Clear staging for new profile
                 refresh_staged_info()
                 refresh_ui()
             
