@@ -493,14 +493,17 @@ def build_header():
             ui.label('🖼️ NiceSorter').classes('text-xl font-bold shrink-0 text-green-400')
             
             # Profile selector with add/delete
+            def change_profile(e):
+                state.profile_name = e.value
+                state.load_active_profile()
+                state.active_cat = "control"  # Reset to default category
+                refresh_staged_info()
+                refresh_ui()
+            
             profile_select = ui.select(
                 list(state.profiles.keys()), 
                 value=state.profile_name,
-                on_change=lambda e: (
-                    setattr(state, 'profile_name', e.value),
-                    state.load_active_profile(),
-                    load_images()
-                )
+                on_change=change_profile
             ).props('dark dense options-dense borderless').classes('w-32')
             
             def add_profile():
