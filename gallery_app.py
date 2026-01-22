@@ -78,7 +78,7 @@ class AppState:
 
     def get_categories(self) -> List[str]:
         """Get list of categories, ensuring active_cat exists."""
-        cats = SorterEngine.get_categories() or ["Default"]
+        cats = SorterEngine.get_categories(self.profile_name) or ["control"]
         if self.active_cat not in cats:
             self.active_cat = cats[0]
         return cats
@@ -132,8 +132,8 @@ def load_images():
     
     state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
     
-    # Restore previously saved tags for this folder
-    restored = SorterEngine.restore_folder_tags(state.source_dir, state.all_images)
+    # Restore previously saved tags for this folder and profile
+    restored = SorterEngine.restore_folder_tags(state.source_dir, state.all_images, state.profile_name)
     if restored > 0:
         ui.notify(f"Restored {restored} tags from previous session", type='info')
     
@@ -238,7 +238,8 @@ async def action_apply_global():
         state.output_dir,
         state.cleanup_mode,
         state.batch_mode,
-        state.source_dir
+        state.source_dir,
+        state.profile_name
     )
     load_images()
     ui.notify("Global apply complete!", type='positive')
@@ -340,7 +341,7 @@ def render_sidebar():
             
             def add_category():
                 if new_cat_input.value:
-                    SorterEngine.add_category(new_cat_input.value)
+                    SorterEngine.add_category(new_cat_input.value, state.profile_name)
                     state.active_cat = new_cat_input.value
                     refresh_staged_info()
                     render_sidebar()
@@ -350,7 +351,7 @@ def render_sidebar():
         # Delete category
         with ui.expansion('Danger Zone', icon='warning').classes('w-full text-red-400 mt-2'):
             def delete_category():
-                SorterEngine.delete_category(state.active_cat)
+                SorterEngine.delete_category(state.active_cat, state.profile_name)
                 refresh_staged_info()
                 render_sidebar()
             
@@ -492,16 +493,57 @@ def build_header():
         with ui.row().classes('w-full items-center gap-4 no-wrap px-4'):
             ui.label('🖼️ NiceSorter').classes('text-xl font-bold shrink-0 text-green-400')
             
-            # Profile selector
-            profile_names = list(state.profiles.keys())
-            
+            # Profile selector with add/delete
             def change_profile(e):
                 state.profile_name = e.value
                 state.load_active_profile()
-                load_images()
+                state.active_cat = "control"  # Reset to default category
+                refresh_staged_info()
+                refresh_ui()
             
-            ui.select(profile_names, value=state.profile_name, on_change=change_profile) \
-                .props('dark dense options-dense borderless').classes('w-32')
+            profile_select = ui.select(
+                list(state.profiles.keys()), 
+                value=state.profile_name,
+                on_change=change_profile
+            ).props('dark dense options-dense borderless').classes('w-32')
+            
+            def add_profile():
+                with ui.dialog() as dialog, ui.card().classes('p-4'):
+                    ui.label('New Profile Name').classes('font-bold')
+                    name_input = ui.input(placeholder='Profile name').props('autofocus')
+                    
+                    def do_create():
+                        name = name_input.value
+                        if name and name not in state.profiles:
+                            state.profiles[name] = {"tab5_source": "/storage", "tab5_out": "/storage"}
+                            SorterEngine.save_tab_paths(name, t5_s="/storage", t5_o="/storage")
+                            state.profile_name = name
+                            state.load_active_profile()
+                            dialog.close()
+                            ui.notify(f"Profile '{name}' created", type='positive')
+                            # Rebuild header to update profile list
+                            ui.navigate.reload()
+                        elif name in state.profiles:
+                            ui.notify("Profile already exists", type='warning')
+                    
+                    with ui.row().classes('w-full justify-end gap-2 mt-2'):
+                        ui.button('Cancel', on_click=dialog.close).props('flat')
+                        ui.button('Create', on_click=do_create).props('color=green')
+                dialog.open()
+            
+            def delete_profile():
+                if len(state.profiles) <= 1:
+                    ui.notify("Cannot delete the last profile", type='warning')
+                    return
+                deleted_name = state.profile_name
+                del state.profiles[state.profile_name]
+                state.profile_name = list(state.profiles.keys())[0]
+                state.load_active_profile()
+                ui.notify(f"Profile '{deleted_name}' deleted", type='info')
+                ui.navigate.reload()
+            
+            ui.button(icon='add', on_click=add_profile).props('flat round dense color=green').tooltip('New profile')
+            ui.button(icon='delete', on_click=delete_profile).props('flat round dense color=red').tooltip('Delete profile')
             
             # Source and output paths
             with ui.row().classes('flex-grow gap-2'):

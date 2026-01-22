@@ -32,7 +32,11 @@ class SorterEngine:
             (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
              PRIMARY KEY (folder_path, filename))''')
         
-        # Seed categories if empty
+        # --- NEW: PROFILE CATEGORIES TABLE (each profile has its own categories) ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
+            (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
+        
+        # Seed categories if empty (legacy table)
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
             for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
@@ -108,21 +112,45 @@ class SorterEngine:
             "tab5_source": r[7], "tab5_out": r[8]
         } for r in rows}
 
-    # --- 3. CATEGORY MANAGEMENT (Sorted A-Z) ---
+    # --- 3. CATEGORY MANAGEMENT (Profile-based) ---
     @staticmethod
-    def get_categories():
+    def get_categories(profile=None):
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM categories ORDER BY name COLLATE NOCASE ASC")
-        cats = [r[0] for r in cursor.fetchall()]
+        
+        # Ensure table exists
+        cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
+            (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
+        
+        if profile:
+            cursor.execute("SELECT category FROM profile_categories WHERE profile = ? ORDER BY category COLLATE NOCASE ASC", (profile,))
+            cats = [r[0] for r in cursor.fetchall()]
+            # If no categories for this profile, seed with defaults
+            if not cats:
+                for cat in ["_TRASH", "control"]:
+                    cursor.execute("INSERT OR IGNORE INTO profile_categories VALUES (?, ?)", (profile, cat))
+                conn.commit()
+                cats = ["_TRASH", "control"]
+        else:
+            # Fallback to legacy table
+            cursor.execute("SELECT name FROM categories ORDER BY name COLLATE NOCASE ASC")
+            cats = [r[0] for r in cursor.fetchall()]
+        
         conn.close()
         return cats
 
     @staticmethod
-    def add_category(name):
+    def add_category(name, profile=None):
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
+        
+        if profile:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
+                (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
+            cursor.execute("INSERT OR IGNORE INTO profile_categories VALUES (?, ?)", (profile, name))
+        else:
+            cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
+        
         conn.commit()
         conn.close()
 
@@ -267,13 +295,13 @@ class SorterEngine:
         return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
         
     @staticmethod
-    def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None):
+    def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None, profile=None):
         """Commits ALL staged files and fixes permissions."""
         data = SorterEngine.get_staged_data()
         
         # Save folder tags BEFORE processing (so we can restore them later)
         if source_root:
-            SorterEngine.save_folder_tags(source_root)
+            SorterEngine.save_folder_tags(source_root, profile)
         
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
@@ -513,11 +541,16 @@ class SorterEngine:
             conn.close()
 
     @staticmethod
-    def delete_category(name):
+    def delete_category(name, profile=None):
         """Deletes a category and clears any staged tags associated with it."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
+        
+        if profile:
+            cursor.execute("DELETE FROM profile_categories WHERE profile = ? AND category = ?", (profile, name))
+        else:
+            cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
+        
         cursor.execute("DELETE FROM staging_area WHERE target_category = ?", (name,))
         conn.commit()
         conn.close()
@@ -536,7 +569,7 @@ class SorterEngine:
 
     # --- 7. FOLDER TAG PERSISTENCE ---
     @staticmethod
-    def save_folder_tags(folder_path):
+    def save_folder_tags(folder_path, profile=None):
         """
         Saves current staging data associated with a folder for later restoration.
         Call this BEFORE clearing the staging area.
@@ -549,11 +582,22 @@ class SorterEngine:
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         
-        # Ensure table exists (for existing databases)
+        # Ensure table exists with profile column
         cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-             PRIMARY KEY (folder_path, filename))''')
+            (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+             PRIMARY KEY (profile, folder_path, filename))''')
         
+        # Check if old schema (without profile) - migrate if needed
+        cursor.execute("PRAGMA table_info(folder_tags)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'profile' not in columns:
+            cursor.execute("DROP TABLE folder_tags")
+            cursor.execute('''CREATE TABLE folder_tags 
+                (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+                 PRIMARY KEY (profile, folder_path, filename))''')
+            conn.commit()
+        
+        profile = profile or "Default"
         saved_count = 0
         for orig_path, info in staged.items():
             # Only save tags for files that are in this folder (or subfolders)
@@ -567,8 +611,8 @@ class SorterEngine:
                 tag_index = int(match.group(1)) if match else 0
                 
                 cursor.execute(
-                    "INSERT OR REPLACE INTO folder_tags VALUES (?, ?, ?, ?)",
-                    (folder_path, filename, category, tag_index)
+                    "INSERT OR REPLACE INTO folder_tags VALUES (?, ?, ?, ?, ?)",
+                    (profile, folder_path, filename, category, tag_index)
                 )
                 saved_count += 1
         
@@ -577,7 +621,7 @@ class SorterEngine:
         return saved_count
 
     @staticmethod
-    def restore_folder_tags(folder_path, all_images):
+    def restore_folder_tags(folder_path, all_images, profile=None):
         """
         Restores previously saved tags for a folder back into the staging area.
         Call this when loading/reloading a folder.
@@ -587,27 +631,27 @@ class SorterEngine:
             conn = sqlite3.connect(SorterEngine.DB_PATH)
             cursor = conn.cursor()
             
-            # Check if table exists and has correct schema
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='folder_tags'")
-            if cursor.fetchone():
-                # Table exists - check if it has the filename column
-                cursor.execute("PRAGMA table_info(folder_tags)")
-                columns = [row[1] for row in cursor.fetchall()]
-                if 'filename' not in columns:
-                    # Wrong schema - drop and recreate
-                    cursor.execute("DROP TABLE folder_tags")
-                    conn.commit()
-            
-            # Create table with correct schema
+            # Ensure table exists with profile column
             cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-                (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-                 PRIMARY KEY (folder_path, filename))''')
-            conn.commit()
+                (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+                 PRIMARY KEY (profile, folder_path, filename))''')
             
-            # Get saved tags for this folder
+            # Check if old schema (without profile) - migrate if needed
+            cursor.execute("PRAGMA table_info(folder_tags)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'profile' not in columns:
+                cursor.execute("DROP TABLE folder_tags")
+                cursor.execute('''CREATE TABLE folder_tags 
+                    (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+                     PRIMARY KEY (profile, folder_path, filename))''')
+                conn.commit()
+            
+            profile = profile or "Default"
+            
+            # Get saved tags for this folder and profile
             cursor.execute(
-                "SELECT filename, category, tag_index FROM folder_tags WHERE folder_path = ?",
-                (folder_path,)
+                "SELECT filename, category, tag_index FROM folder_tags WHERE profile = ? AND folder_path = ?",
+                (profile, folder_path)
             )
             saved_tags = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
             
@@ -619,7 +663,6 @@ class SorterEngine:
             filename_to_path = {}
             for img_path in all_images:
                 fname = os.path.basename(img_path)
-                # Only map files that haven't been mapped yet (handles duplicates by using first occurrence)
                 if fname not in filename_to_path:
                     filename_to_path[fname] = img_path
             
@@ -628,7 +671,6 @@ class SorterEngine:
             for filename, tag_info in saved_tags.items():
                 if filename in filename_to_path:
                     full_path = filename_to_path[filename]
-                    # Check if not already staged
                     cursor.execute("SELECT 1 FROM staging_area WHERE original_path = ?", (full_path,))
                     if not cursor.fetchone():
                         ext = os.path.splitext(filename)[1]
