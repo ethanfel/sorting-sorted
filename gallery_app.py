@@ -1,5 +1,5 @@
 import os
-import math
+import mathgg
 import asyncio
 from typing import Optional, List, Dict, Set
 from nicegui import ui, app, run
