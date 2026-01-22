@@ -32,7 +32,11 @@ class SorterEngine:
             (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
              PRIMARY KEY (folder_path, filename))''')
         
-        # Seed categories if empty
+        # --- NEW: PROFILE CATEGORIES TABLE (each profile has its own categories) ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
+            (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
+        
+        # Seed categories if empty (legacy table)
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
             for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
@@ -108,21 +112,45 @@ class SorterEngine:
             "tab5_source": r[7], "tab5_out": r[8]
         } for r in rows}
 
-    # --- 3. CATEGORY MANAGEMENT (Sorted A-Z) ---
+    # --- 3. CATEGORY MANAGEMENT (Profile-based) ---
     @staticmethod
-    def get_categories():
+    def get_categories(profile=None):
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM categories ORDER BY name COLLATE NOCASE ASC")
-        cats = [r[0] for r in cursor.fetchall()]
+        
+        # Ensure table exists
+        cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
+            (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
+        
+        if profile:
+            cursor.execute("SELECT category FROM profile_categories WHERE profile = ? ORDER BY category COLLATE NOCASE ASC", (profile,))
+            cats = [r[0] for r in cursor.fetchall()]
+            # If no categories for this profile, seed with defaults
+            if not cats:
+                for cat in ["_TRASH", "control"]:
+                    cursor.execute("INSERT OR IGNORE INTO profile_categories VALUES (?, ?)", (profile, cat))
+                conn.commit()
+                cats = ["_TRASH", "control"]
+        else:
+            # Fallback to legacy table
+            cursor.execute("SELECT name FROM categories ORDER BY name COLLATE NOCASE ASC")
+            cats = [r[0] for r in cursor.fetchall()]
+        
         conn.close()
         return cats
 
     @staticmethod
-    def add_category(name):
+    def add_category(name, profile=None):
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
+        
+        if profile:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
+                (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
+            cursor.execute("INSERT OR IGNORE INTO profile_categories VALUES (?, ?)", (profile, name))
+        else:
+            cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
+        
         conn.commit()
         conn.close()
 
@@ -513,11 +541,16 @@ class SorterEngine:
             conn.close()
 
     @staticmethod
-    def delete_category(name):
+    def delete_category(name, profile=None):
         """Deletes a category and clears any staged tags associated with it."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
+        
+        if profile:
+            cursor.execute("DELETE FROM profile_categories WHERE profile = ? AND category = ?", (profile, name))
+        else:
+            cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
+        
         cursor.execute("DELETE FROM staging_area WHERE target_category = ?", (name,))
         conn.commit()
         conn.close()
