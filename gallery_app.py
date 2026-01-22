@@ -30,6 +30,13 @@ class AppState:
         # Tagging State
         self.active_cat = "control"
         self.next_index = 1
+        self.hovered_image = None  # Track currently hovered image for keyboard shortcuts
+        
+        # Undo Stack
+        self.undo_stack: List[Dict] = []  # Stores last actions for undo
+        
+        # Filter Mode
+        self.filter_mode = "all"  # "all", "tagged", "untagged"
         
         # Batch Settings
         self.batch_mode = "Copy"
@@ -83,17 +90,35 @@ class AppState:
             self.active_cat = cats[0]
         return cats
 
+    def get_filtered_images(self) -> List[str]:
+        """Get images based on current filter mode."""
+        if self.filter_mode == "all":
+            return self.all_images
+        elif self.filter_mode == "tagged":
+            return [img for img in self.all_images if img in self.staged_data]
+        elif self.filter_mode == "untagged":
+            return [img for img in self.all_images if img not in self.staged_data]
+        return self.all_images
+
     @property
     def total_pages(self) -> int:
-        """Calculate total pages."""
-        return math.ceil(len(self.all_images) / self.page_size) if self.all_images else 0
+        """Calculate total pages based on filtered images."""
+        filtered = self.get_filtered_images()
+        return math.ceil(len(filtered) / self.page_size) if filtered else 0
 
     def get_current_batch(self) -> List[str]:
-        """Get images for current page."""
-        if not self.all_images:
+        """Get images for current page based on filter."""
+        filtered = self.get_filtered_images()
+        if not filtered:
             return []
         start = self.page * self.page_size
-        return self.all_images[start : start + self.page_size]
+        return filtered[start : start + self.page_size]
+    
+    def get_stats(self) -> Dict:
+        """Get image statistics for display."""
+        total = len(self.all_images)
+        tagged = len([img for img in self.all_images if img in self.staged_data])
+        return {"total": total, "tagged": tagged, "untagged": total - tagged}
 
 state = AppState()
 
@@ -199,6 +224,17 @@ def action_tag(img_path: str, manual_idx: Optional[int] = None):
         ui.notify(f"Conflict: {name} exists. Using suffix.", type='warning')
         name = f"{state.active_cat}_{idx:03d}_{len(staged_names)+1}{ext}"
     
+    # Save to undo stack
+    state.undo_stack.append({
+        "action": "tag",
+        "path": img_path,
+        "category": state.active_cat,
+        "name": name,
+        "index": idx
+    })
+    if len(state.undo_stack) > 50:  # Limit undo history
+        state.undo_stack.pop(0)
+    
     SorterEngine.stage_image(img_path, state.active_cat, name)
     
     # Only auto-increment if we used the default next_index (not manual)
@@ -210,14 +246,66 @@ def action_tag(img_path: str, manual_idx: Optional[int] = None):
 
 def action_untag(img_path: str):
     """Remove staging from an image."""
+    # Save to undo stack
+    if img_path in state.staged_data:
+        info = state.staged_data[img_path]
+        state.undo_stack.append({
+            "action": "untag",
+            "path": img_path,
+            "category": info['cat'],
+            "name": info['name'],
+            "index": _extract_index(info['name'])
+        })
+        if len(state.undo_stack) > 50:
+            state.undo_stack.pop(0)
+    
     SorterEngine.clear_staged_item(img_path)
     refresh_staged_info()
     refresh_ui()
 
 def action_delete(img_path: str):
     """Delete image to trash."""
+    # Save to undo stack
+    state.undo_stack.append({
+        "action": "delete",
+        "path": img_path
+    })
+    if len(state.undo_stack) > 50:
+        state.undo_stack.pop(0)
+    
     SorterEngine.delete_to_trash(img_path)
     load_images()
+
+def action_undo():
+    """Undo the last action."""
+    if not state.undo_stack:
+        ui.notify("Nothing to undo", type='warning')
+        return
+    
+    last = state.undo_stack.pop()
+    
+    if last["action"] == "tag":
+        # Undo tag = untag
+        SorterEngine.clear_staged_item(last["path"])
+        ui.notify(f"Undid tag: {os.path.basename(last['path'])}", type='info')
+    
+    elif last["action"] == "untag":
+        # Undo untag = re-tag with same settings
+        SorterEngine.stage_image(last["path"], last["category"], last["name"])
+        ui.notify(f"Undid untag: {os.path.basename(last['path'])}", type='info')
+    
+    elif last["action"] == "delete":
+        # Undo delete = restore from trash
+        trash_path = os.path.join(os.path.dirname(last["path"]), "_DELETED", os.path.basename(last["path"]))
+        if os.path.exists(trash_path):
+            import shutil
+            shutil.move(trash_path, last["path"])
+            ui.notify(f"Restored: {os.path.basename(last['path'])}", type='info')
+        else:
+            ui.notify("Cannot restore - file not in trash", type='warning')
+    
+    refresh_staged_info()
+    refresh_ui()
 
 def action_apply_page():
     """Apply staged changes for current page only."""
@@ -370,6 +458,24 @@ def render_sidebar():
                 render_sidebar()
             
             ui.button('🔄', on_click=reset_index).props('flat color=white')
+        
+        # Keyboard shortcuts help
+        ui.separator().classes('my-4 bg-gray-700')
+        with ui.expansion('⌨️ Keyboard Shortcuts', icon='keyboard').classes('w-full text-gray-400'):
+            shortcuts = [
+                ("1-9", "Tag hovered image with index"),
+                ("0", "Tag with next index"),
+                ("U", "Untag hovered image"),
+                ("F", "Cycle filter (all/untagged/tagged)"),
+                ("Ctrl+Z", "Undo last action"),
+                ("Ctrl+1-5", "Switch category"),
+                ("← →", "Previous/Next page"),
+                ("Double-click", "Tag/Untag image"),
+            ]
+            for key, desc in shortcuts:
+                with ui.row().classes('w-full justify-between text-xs'):
+                    ui.label(key).classes('text-green-400 font-mono')
+                    ui.label(desc).classes('text-gray-500')
 
 def render_gallery():
     """Render image gallery grid."""
@@ -386,7 +492,13 @@ def render_image_card(img_path: str):
     is_staged = img_path in state.staged_data
     thumb_size = 800
     
-    with ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow'):
+    card = ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow hover:border-green-500 transition-colors')
+    
+    with card:
+        # Track hover for keyboard shortcuts
+        card.on('mouseenter', lambda p=img_path: setattr(state, 'hovered_image', p))
+        card.on('mouseleave', lambda: setattr(state, 'hovered_image', None))
+        
         # Header with filename and actions
         with ui.row().classes('w-full justify-between no-wrap mb-1'):
             ui.label(os.path.basename(img_path)[:15]).classes('text-xs text-gray-400 truncate')
@@ -400,10 +512,16 @@ def render_image_card(img_path: str):
                     on_click=lambda p=img_path: action_delete(p)
                 ).props('flat size=sm dense color=red')
         
-        # Thumbnail
-        ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
-            .classes('w-full h-64 bg-black rounded') \
+        # Thumbnail with double-click to tag
+        img = ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
+            .classes('w-full h-64 bg-black rounded cursor-pointer') \
             .props('fit=contain no-spinner')
+        
+        # Double-click to tag (if not already tagged)
+        if not is_staged:
+            img.on('dblclick', lambda p=img_path: action_tag(p))
+        else:
+            img.on('dblclick', lambda p=img_path: action_untag(p))
         
         # Tagging UI
         if is_staged:
@@ -428,10 +546,37 @@ def render_pagination():
     """Render pagination controls."""
     state.pagination_container.clear()
     
-    if state.total_pages <= 1:
-        return
+    stats = state.get_stats()
     
     with state.pagination_container:
+        # Stats bar
+        with ui.row().classes('w-full justify-center items-center gap-4 mb-2'):
+            ui.label(f"📁 {stats['total']} images").classes('text-gray-400')
+            ui.label(f"🏷️ {stats['tagged']} tagged").classes('text-green-400')
+            ui.label(f"⬜ {stats['untagged']} untagged").classes('text-gray-500')
+            
+            # Filter toggle
+            filter_colors = {"all": "grey", "tagged": "green", "untagged": "orange"}
+            filter_icons = {"all": "filter_list", "tagged": "label", "untagged": "label_off"}
+            ui.button(
+                f"Filter: {state.filter_mode}",
+                icon=filter_icons[state.filter_mode],
+                on_click=lambda: (
+                    setattr(state, 'filter_mode', {"all": "untagged", "untagged": "tagged", "tagged": "all"}[state.filter_mode]),
+                    setattr(state, 'page', 0),
+                    refresh_ui()
+                )
+            ).props(f'flat color={filter_colors[state.filter_mode]}').classes('ml-4')
+            
+            # Undo button
+            ui.button(
+                icon='undo',
+                on_click=action_undo
+            ).props('flat color=white').tooltip('Undo (Ctrl+Z)')
+        
+        if state.total_pages <= 1:
+            return
+        
         # Page slider
         ui.slider(
             min=0,
@@ -439,6 +584,9 @@ def render_pagination():
             value=state.page,
             on_change=lambda e: set_page(int(e.value))
         ).classes('w-1/2 mb-2').props('color=green')
+        
+        # Page info
+        ui.label(f"Page {state.page + 1} / {state.total_pages}").classes('text-gray-400 text-sm mb-2')
         
         # Page buttons
         with ui.row().classes('items-center gap-2'):
@@ -474,14 +622,53 @@ def refresh_ui():
     render_gallery()
 
 def handle_keyboard(e):
-    """Handle keyboard navigation."""
+    """Handle keyboard navigation and shortcuts."""
     if not e.action.keydown:
         return
     
-    if e.key.arrow_left and state.page > 0:
+    key = e.key
+    
+    # Navigation
+    if key.arrow_left and state.page > 0:
         set_page(state.page - 1)
-    elif e.key.arrow_right and state.page < state.total_pages - 1:
+    elif key.arrow_right and state.page < state.total_pages - 1:
         set_page(state.page + 1)
+    
+    # Undo (Ctrl+Z)
+    elif key == 'z' and e.modifiers.ctrl:
+        action_undo()
+    
+    # Quick category switch (Ctrl+1 through Ctrl+5)
+    elif e.modifiers.ctrl and key in '12345':
+        cats = state.get_categories()
+        cat_idx = int(key) - 1
+        if cat_idx < len(cats):
+            state.active_cat = cats[cat_idx]
+            refresh_staged_info()
+            refresh_ui()
+            ui.notify(f"Category: {state.active_cat}", type='info')
+    
+    # Number keys 1-9 to tag hovered image
+    elif key in '123456789' and not e.modifiers.ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image, int(key))
+    
+    # 0 key to tag with next_index
+    elif key == '0' and state.hovered_image and state.hovered_image not in state.staged_data:
+        action_tag(state.hovered_image)
+    
+    # U to untag hovered image
+    elif key == 'u' and state.hovered_image and state.hovered_image in state.staged_data:
+        action_untag(state.hovered_image)
+    
+    # F to cycle filter modes
+    elif key == 'f' and not e.modifiers.ctrl:
+        modes = ["all", "untagged", "tagged"]
+        current_idx = modes.index(state.filter_mode)
+        state.filter_mode = modes[(current_idx + 1) % 3]
+        state.page = 0  # Reset to first page when changing filter
+        refresh_ui()
+        ui.notify(f"Filter: {state.filter_mode}", type='info')
 
 # ==========================================
 # MAIN LAYOUT
