@@ -1,711 +1,634 @@
 import os
-import shutil
-import sqlite3
-from PIL import Image
-from io import BytesIO
+import math
+import asyncio
+from typing import Optional, List, Dict, Set
+from nicegui import ui, app, run
+from fastapi import Response
+from engine import SorterEngine
 
-class SorterEngine:
-    DB_PATH = "/app/sorter_database.db"
+# ==========================================
+# STATE MANAGEMENT
+# ==========================================
+class AppState:
+    """Centralized application state with lazy loading."""
+    
+    def __init__(self):
+        # Profile Data
+        self.profiles = SorterEngine.load_profiles()
+        self.profile_name = "Default"
+        if not self.profiles:
+            self.profiles = {"Default": {"tab5_source": "/storage", "tab5_out": "/storage"}}
+        
+        self.load_active_profile()
+        
+        # View Settings
+        self.page = 0
+        self.page_size = 24
+        self.grid_cols = 4
+        self.preview_quality = 50 
+        
+        # Tagging State
+        self.active_cat = "control"
+        self.next_index = 1
+        
+        # Batch Settings
+        self.batch_mode = "Copy"
+        self.cleanup_mode = "Keep"
+        
+        # Data Caches
+        self.all_images: List[str] = []
+        self.staged_data: Dict = {}
+        self.green_dots: Set[int] = set()
+        self.index_map: Dict[int, str] = {}
+        
+        # UI Containers (populated later)
+        self.sidebar_container = None
+        self.grid_container = None
+        self.pagination_container = None
 
-    # --- 1. DATABASE INITIALIZATION ---
-    @staticmethod
-    def init_db():
-        """Initializes tables, including the new HISTORY log."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        # Existing tables...
-        cursor.execute('''CREATE TABLE IF NOT EXISTS profiles 
-            (name TEXT PRIMARY KEY, tab1_target TEXT, tab2_target TEXT, tab2_control TEXT, 
-             tab4_source TEXT, tab4_out TEXT, mode TEXT, tab5_source TEXT, tab5_out TEXT)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_ids (path TEXT PRIMARY KEY, folder_id INTEGER)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS categories (name TEXT PRIMARY KEY)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS staging_area 
-            (original_path TEXT PRIMARY KEY, target_category TEXT, new_name TEXT, is_marked INTEGER DEFAULT 0)''')
-            
-        # --- NEW: HISTORY TABLE ---
-        cursor.execute('''CREATE TABLE IF NOT EXISTS processed_log 
-            (source_path TEXT PRIMARY KEY, category TEXT, action_type TEXT)''')
-        
-        # --- NEW: FOLDER TAGS TABLE (persists tags by folder) ---
-        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-             PRIMARY KEY (folder_path, filename))''')
-        
-        # --- NEW: PROFILE CATEGORIES TABLE (each profile has its own categories) ---
-        cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
-            (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
-        
-        # Seed categories if empty (legacy table)
-        cursor.execute("SELECT COUNT(*) FROM categories")
-        if cursor.fetchone()[0] == 0:
-            for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
-                cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (cat,))
-        
-        conn.commit()
-        conn.close()
+    def load_active_profile(self):
+        """Load paths from active profile."""
+        p_data = self.profiles.get(self.profile_name, {})
+        self.input_base = p_data.get("tab5_source", "/storage")
+        self.output_base = p_data.get("tab5_out", "/storage")
+        self.folder_name = ""
 
-    # --- 2. PROFILE & PATH MANAGEMENT ---
-    @staticmethod
-    def save_tab_paths(profile_name, t1_t=None, t2_t=None, t2_c=None, t4_s=None, t4_o=None, mode=None, t5_s=None, t5_o=None):
-        """Updates specific tab paths in the database while preserving others."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles WHERE name = ?", (profile_name,))
-        row = cursor.fetchone()
-        
-        if not row:
-            # Default structure if profile is new (9 columns total)
-            row = (profile_name, "/storage", "/storage", "/storage", "/storage", "/storage", "id", "/storage", "/storage")
-            
-        new_values = (
-            profile_name,
-            t1_t if t1_t is not None else row[1],
-            t2_t if t2_t is not None else row[2],
-            t2_c if t2_c is not None else row[3],
-            t4_s if t4_s is not None else row[4],
-            t4_o if t4_o is not None else row[5],
-            mode if mode is not None else row[6],
-            t5_s if t5_s is not None else row[7],
-            t5_o if t5_o is not None else row[8]
-        )
-        cursor.execute("INSERT OR REPLACE INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", new_values)
-        conn.commit()
-        conn.close()
-    @staticmethod
-    def load_batch_parallel(image_paths, quality):
-        """
-        Multithreaded loader: Compresses multiple images in parallel.
-        Returns a dictionary {path: bytes_io}
-        """
-        import concurrent.futures
-        
-        results = {}
-        
-        # Helper function to run in thread
-        def process_one(path):
-            return path, SorterEngine.compress_for_web(path, quality)
+    @property
+    def source_dir(self):
+        """Computed source path: input_base/folder_name or just input_base."""
+        if self.folder_name:
+            return os.path.join(self.input_base, self.folder_name)
+        return self.input_base
 
-        # Use ThreadPool to parallelize IO-bound tasks
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            # Submit all tasks
-            future_to_path = {executor.submit(process_one, p): p for p in image_paths}
-            
-            # Gather results as they complete
-            for future in concurrent.futures.as_completed(future_to_path):
-                path, data = future.result()
-                results[path] = data
-                
-        return results
+    @property
+    def output_dir(self):
+        """Computed output path: output_base/folder_name or just output_base."""
+        if self.folder_name:
+            return os.path.join(self.output_base, self.folder_name)
+        return self.output_base
 
-    @staticmethod
-    def load_profiles():
-        """Loads all workspace presets."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles")
-        rows = cursor.fetchall()
-        conn.close()
-        return {r[0]: {
-            "tab1_target": r[1], "tab2_target": r[2], "tab2_control": r[3], 
-            "tab4_source": r[4], "tab4_out": r[5], "mode": r[6],
-            "tab5_source": r[7], "tab5_out": r[8]
-        } for r in rows}
+    def save_current_profile(self):
+        """Save current paths to active profile."""
+        if self.profile_name not in self.profiles:
+            self.profiles[self.profile_name] = {}
+        self.profiles[self.profile_name]["tab5_source"] = self.input_base
+        self.profiles[self.profile_name]["tab5_out"] = self.output_base
+        SorterEngine.save_tab_paths(self.profile_name, t5_s=self.input_base, t5_o=self.output_base)
+        ui.notify(f"Profile '{self.profile_name}' saved!", type='positive')
 
-    # --- 3. CATEGORY MANAGEMENT (Profile-based) ---
-    @staticmethod
-    def get_categories(profile=None):
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        # Ensure table exists
-        cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
-            (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
-        
-        if profile:
-            cursor.execute("SELECT category FROM profile_categories WHERE profile = ? ORDER BY category COLLATE NOCASE ASC", (profile,))
-            cats = [r[0] for r in cursor.fetchall()]
-            # If no categories for this profile, seed with defaults
-            if not cats:
-                for cat in ["_TRASH", "control"]:
-                    cursor.execute("INSERT OR IGNORE INTO profile_categories VALUES (?, ?)", (profile, cat))
-                conn.commit()
-                cats = ["_TRASH", "control"]
-        else:
-            # Fallback to legacy table
-            cursor.execute("SELECT name FROM categories ORDER BY name COLLATE NOCASE ASC")
-            cats = [r[0] for r in cursor.fetchall()]
-        
-        conn.close()
+    def get_categories(self) -> List[str]:
+        """Get list of categories, ensuring active_cat exists."""
+        cats = SorterEngine.get_categories(self.profile_name) or ["control"]
+        if self.active_cat not in cats:
+            self.active_cat = cats[0]
         return cats
 
-    @staticmethod
-    def add_category(name, profile=None):
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        if profile:
-            cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
-                (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
-            cursor.execute("INSERT OR IGNORE INTO profile_categories VALUES (?, ?)", (profile, name))
-        else:
-            cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (name,))
-        
-        conn.commit()
-        conn.close()
+    @property
+    def total_pages(self) -> int:
+        """Calculate total pages."""
+        return math.ceil(len(self.all_images) / self.page_size) if self.all_images else 0
 
-    @staticmethod
-    def rename_category(old_name, new_name, output_base_path):
-        """Renames category in DB and renames the physical folder on disk."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE categories SET name = ? WHERE name = ?", (new_name, old_name))
-        
-        old_path = os.path.join(output_base_path, old_name)
-        new_path = os.path.join(output_base_path, new_name)
-        if os.path.exists(old_path) and not os.path.exists(new_path):
-            os.rename(old_path, new_path)
-        
-        conn.commit()
-        conn.close()
+    def get_current_batch(self) -> List[str]:
+        """Get images for current page."""
+        if not self.all_images:
+            return []
+        start = self.page * self.page_size
+        return self.all_images[start : start + self.page_size]
 
-    @staticmethod
-    def sync_categories_from_disk(output_path):
-        """Scans output directory and adds subfolders as DB categories."""
-        if not output_path or not os.path.exists(output_path): return 0
-        existing_folders = [d for d in os.listdir(output_path) if os.path.isdir(os.path.join(output_path, d)) and not d.startswith(".")]
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        added = 0
-        for folder in existing_folders:
-            cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (folder,))
-            if cursor.rowcount > 0: added += 1
-        conn.commit()
-        conn.close()
-        return added
+state = AppState()
 
-    # --- 4. IMAGE & ID OPERATIONS ---
-    @staticmethod
-    def get_images(path, recursive=False):
-        """Image scanner with optional recursive subfolder support."""
-        exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
-        if not path or not os.path.exists(path): return []
-        image_list = []
-        if recursive:
-            for root, _, files in os.walk(path):
-                # Skip the trash folder from scanning
-                if "_DELETED" in root: continue
-                for f in files:
-                    if f.lower().endswith(exts): image_list.append(os.path.join(root, f))
-        else:
-            for f in os.listdir(path):
-                if f.lower().endswith(exts): image_list.append(os.path.join(path, f))
-        return sorted(image_list)
+# ==========================================
+# IMAGE SERVING API
+# ==========================================
 
-    @staticmethod
-    def get_id_mapping(path):
-        """Maps idXXX prefixes for Tab 2 collision handling."""
-        mapping = {}
-        images = SorterEngine.get_images(path, recursive=False)
-        for f in images:
-            fname = os.path.basename(f)
-            if fname.startswith("id") and "_" in fname:
-                prefix = fname.split('_')[0]
-                if prefix not in mapping: mapping[prefix] = []
-                mapping[prefix].append(fname)
-        return mapping
+@app.get('/thumbnail')
+async def get_thumbnail(path: str, size: int = 400, q: int = 50):
+    """Serve WebP thumbnail with dynamic quality."""
+    if not os.path.exists(path):
+        return Response(status_code=404)
+    img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, q, size)
+    return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
 
-    @staticmethod
-    def get_max_id_number(target_path):
-        max_id = 0
-        if not target_path or not os.path.exists(target_path): return 0
-        for f in os.listdir(target_path):
-            if f.startswith("id") and "_" in f:
-                try:
-                    num = int(f[2:].split('_')[0])
-                    if num > max_id: max_id = num
-                except: continue
-        return max_id
+@app.get('/full_res')
+async def get_full_res(path: str):
+    """Serve full resolution image."""
+    if not os.path.exists(path):
+        return Response(status_code=404)
+    img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, 90, None)
+    return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
 
-    @staticmethod
-    def get_folder_id(source_path):
-        """Retrieves or generates a persistent ID for a specific folder."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT folder_id FROM folder_ids WHERE path = ?", (source_path,))
-        result = cursor.fetchone()
-        if result:
-            fid = result[0]
-        else:
-            cursor.execute("SELECT MAX(folder_id) FROM folder_ids")
-            row = cursor.fetchone()
-            fid = (row[0] + 1) if row and row[0] else 1
-            cursor.execute("INSERT INTO folder_ids VALUES (?, ?)", (source_path, fid))
-            conn.commit()
-        conn.close()
-        return fid
+# ==========================================
+# CORE LOGIC
+# ==========================================
 
-    # --- 5. GALLERY STAGING & DELETION (TAB 5) ---
-    @staticmethod
-    def delete_to_trash(file_path):
-        """Moves a file to a local _DELETED subfolder for undo support."""
-        if not os.path.exists(file_path): return None
-        trash_dir = os.path.join(os.path.dirname(file_path), "_DELETED")
-        os.makedirs(trash_dir, exist_ok=True)
-        dest = os.path.join(trash_dir, os.path.basename(file_path))
-        shutil.move(file_path, dest)
-        return dest
+def load_images():
+    """Load images from source directory."""
+    if not os.path.exists(state.source_dir):
+        ui.notify(f"Source not found: {state.source_dir}", type='warning')
+        return
+    
+    # Clear staging area when loading a new folder
+    SorterEngine.clear_staging_area()
+    
+    state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
+    
+    # Restore previously saved tags for this folder
+    restored = SorterEngine.restore_folder_tags(state.source_dir, state.all_images)
+    if restored > 0:
+        ui.notify(f"Restored {restored} tags from previous session", type='info')
+    
+    # Reset page if out of bounds
+    if state.page >= state.total_pages:
+        state.page = 0
+    
+    refresh_staged_info()
+    refresh_ui()
 
-    @staticmethod
-    def stage_image(original_path, category, new_name):
-        """Records a pending rename/move in the database."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)", (original_path, category, new_name))
-        conn.commit()
-        conn.close()
+def refresh_staged_info():
+    """Update staged data and index maps."""
+    state.staged_data = SorterEngine.get_staged_data()
+    
+    # Update green dots (pages with staged images)
+    state.green_dots.clear()
+    staged_keys = set(state.staged_data.keys())
+    for idx, img_path in enumerate(state.all_images):
+        if img_path in staged_keys:
+            state.green_dots.add(idx // state.page_size)
+    
+    # Build index map for active category
+    state.index_map.clear()
+    
+    # Add staged images
+    for orig_path, info in state.staged_data.items():
+        if info['cat'] == state.active_cat:
+            idx = _extract_index(info['name'])
+            if idx is not None:
+                state.index_map[idx] = orig_path
+    
+    # Add committed images from disk
+    cat_path = os.path.join(state.output_dir, state.active_cat)
+    if os.path.exists(cat_path):
+        for filename in os.listdir(cat_path):
+            if filename.startswith(state.active_cat):
+                idx = _extract_index(filename)
+                if idx is not None and idx not in state.index_map:
+                    state.index_map[idx] = os.path.join(cat_path, filename)
 
-    @staticmethod
-    def clear_staged_item(original_path):
-        """Removes an item from the pending staging area."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
-        conn.commit()
-        conn.close()
+def _extract_index(filename: str) -> Optional[int]:
+    """Extract numeric index from filename (e.g., 'Cat_042.jpg' -> 42)."""
+    try:
+        return int(filename.rsplit('_', 1)[1].split('.')[0])
+    except (ValueError, IndexError):
+        return None
 
-    @staticmethod
-    def clear_staging_area():
-        """Clears all items from the staging area."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM staging_area")
-        conn.commit()
-        conn.close()
+# ==========================================
+# ACTIONS
+# ==========================================
 
-    @staticmethod
-    def get_staged_data():
-        """Retrieves current tagged/staged images."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM staging_area")
-        rows = cursor.fetchall()
-        conn.close()
-        # FIXED: Added "marked": r[3] to the dictionary
-        return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
-        
-    @staticmethod
-    def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None, profile=None):
-        """Commits ALL staged files and fixes permissions."""
-        data = SorterEngine.get_staged_data()
-        
-        # Save folder tags BEFORE processing (so we can restore them later)
-        if source_root:
-            SorterEngine.save_folder_tags(source_root, profile)
-        
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        if not os.path.exists(output_root): os.makedirs(output_root, exist_ok=True)
-        
-        # 1. Process all Staged Items
-        for old_p, info in data.items():
-            if os.path.exists(old_p):
-                final_dst = os.path.join(output_root, info['name'])
-                
-                if os.path.exists(final_dst):
-                    root, ext = os.path.splitext(info['name'])
-                    c = 1
-                    while os.path.exists(final_dst):
-                         final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
-                         c += 1
+def action_tag(img_path: str, manual_idx: Optional[int] = None):
+    """Tag an image with category and index."""
+    idx = manual_idx if manual_idx is not None else state.next_index
+    ext = os.path.splitext(img_path)[1]
+    name = f"{state.active_cat}_{idx:03d}{ext}"
+    
+    # Check for conflicts
+    final_path = os.path.join(state.output_dir, state.active_cat, name)
+    staged_names = {v['name'] for v in state.staged_data.values() if v['cat'] == state.active_cat}
+    
+    if name in staged_names or os.path.exists(final_path):
+        ui.notify(f"Conflict: {name} exists. Using suffix.", type='warning')
+        name = f"{state.active_cat}_{idx:03d}_{len(staged_names)+1}{ext}"
+    
+    SorterEngine.stage_image(img_path, state.active_cat, name)
+    
+    # Only auto-increment if we used the default next_index (not manual)
+    if manual_idx is None:
+        state.next_index = idx + 1
+    
+    refresh_staged_info()
+    refresh_ui()
 
-                if operation == "Copy":
-                    shutil.copy2(old_p, final_dst)
-                else:
-                    shutil.move(old_p, final_dst)
-                
-                # --- FIX PERMISSIONS ---
-                SorterEngine.fix_permissions(final_dst)
-                
-                # Log History
-                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
-                               (old_p, info['cat'], operation))
+def action_untag(img_path: str):
+    """Remove staging from an image."""
+    SorterEngine.clear_staged_item(img_path)
+    refresh_staged_info()
+    refresh_ui()
 
-        # 2. Global Cleanup
-        if cleanup_mode != "Keep" and source_root:
-            all_imgs = SorterEngine.get_images(source_root, recursive=True)
-            for img_p in all_imgs:
-                if img_p not in data:
-                    if cleanup_mode == "Move to Unused":
-                        unused_dir = os.path.join(source_root, "unused")
-                        os.makedirs(unused_dir, exist_ok=True)
-                        dest_unused = os.path.join(unused_dir, os.path.basename(img_p))
-                        
-                        shutil.move(img_p, dest_unused)
-                        SorterEngine.fix_permissions(dest_unused)
-                        
-                    elif cleanup_mode == "Delete": 
-                        os.remove(img_p)
+def action_delete(img_path: str):
+    """Delete image to trash."""
+    SorterEngine.delete_to_trash(img_path)
+    load_images()
 
-        cursor.execute("DELETE FROM staging_area")
-        conn.commit()
-        conn.close()
+def action_apply_page():
+    """Apply staged changes for current page only."""
+    batch = state.get_current_batch()
+    if not batch:
+        ui.notify("No images on current page", type='warning')
+        return
+    
+    SorterEngine.commit_batch(batch, state.output_dir, state.cleanup_mode, state.batch_mode)
+    ui.notify(f"Page processed ({state.batch_mode})", type='positive')
+    load_images()
 
-    # --- 6. CORE UTILITIES (SYNC & UNDO) ---
-    @staticmethod
-    def harmonize_names(t_p, c_p):
-        """Forces the 'control' file to match the 'target' file's name."""
-        if not os.path.exists(t_p) or not os.path.exists(c_p): return c_p
-        
-        t_name = os.path.basename(t_p)
-        t_root, t_ext = os.path.splitext(t_name)
-        c_ext = os.path.splitext(c_p)[1]
-        
-        new_c_name = f"{t_root}{c_ext}"
-        new_c_p = os.path.join(os.path.dirname(c_p), new_c_name)
-        
-        if os.path.exists(new_c_p) and c_p != new_c_p:
-            new_c_p = os.path.join(os.path.dirname(c_p), f"{t_root}_alt{c_ext}")
+async def action_apply_global():
+    """Apply all staged changes globally."""
+    ui.notify("Starting global apply... This may take a while.", type='info')
+    await run.io_bound(
+        SorterEngine.commit_global,
+        state.output_dir,
+        state.cleanup_mode,
+        state.batch_mode,
+        state.source_dir
+    )
+    load_images()
+    ui.notify("Global apply complete!", type='positive')
+
+# ==========================================
+# UI COMPONENTS
+# ==========================================
+
+def open_zoom_dialog(path: str, title: Optional[str] = None, show_untag: bool = False, show_jump: bool = False):
+    """Open full-resolution image dialog with optional actions."""
+    with ui.dialog() as dialog, ui.card().classes('w-full max-w-screen-xl p-0 gap-0 bg-black'):
+        with ui.row().classes('w-full justify-between items-center p-2 bg-gray-900 text-white'):
+            ui.label(title or os.path.basename(path)).classes('font-bold truncate px-2')
             
-        os.rename(c_p, new_c_p)
-        return new_c_p
-
-    @staticmethod
-    def re_id_file(old_path, new_id_prefix):
-        """Changes the idXXX_ prefix to resolve collisions."""
-        dir_name = os.path.dirname(old_path)
-        old_name = os.path.basename(old_path)
-        name_no_id = old_name.split('_', 1)[1] if '_' in old_name else old_name
-        new_name = f"{new_id_prefix}{name_no_id}"
-        new_path = os.path.join(dir_name, new_name)
-        os.rename(old_path, new_path)
-        return new_path
-
-    @staticmethod
-    def move_to_unused_synced(t_p, c_p, t_root, c_root):
-        """Moves a pair to 'unused' subfolders."""
-        t_name = os.path.basename(t_p)
-        t_un = os.path.join(t_root, "unused", t_name)
-        c_un = os.path.join(c_root, "unused", t_name)
-        os.makedirs(os.path.dirname(t_un), exist_ok=True)
-        os.makedirs(os.path.dirname(c_un), exist_ok=True)
-        shutil.move(t_p, t_un)
-        shutil.move(c_p, c_un)
-        return t_un, c_un
-
-    @staticmethod
-    def restore_from_unused(t_p, c_p, t_root, c_root):
-        """Moves files back from 'unused' to main folders."""
-        t_name = os.path.basename(t_p)
-        t_dst = os.path.join(t_root, "selected_target", t_name)
-        c_dst = os.path.join(c_root, "selected_control", t_name)
-        os.makedirs(os.path.dirname(t_dst), exist_ok=True)
-        os.makedirs(os.path.dirname(c_dst), exist_ok=True)
-        shutil.move(t_p, t_dst)
-        shutil.move(c_p, c_dst)
-        return t_dst, c_dst
-
-    @staticmethod
-    def compress_for_web(path, quality, target_size=None):
-        """
-        Loads image, resizes smart, and saves as WebP.
-        """
-        try:
-            with Image.open(path) as img:
-                # 1. Convert to RGB (WebP handles RGBA, but RGB is safer for consistency)
-                if img.mode not in ('RGB', 'RGBA'):
-                    img = img.convert("RGB")
-                
-                # 2. Smart Resize (Only if target_size is provided)
-                if target_size:
-                    # Only resize if the original is actually bigger
-                    if img.width > target_size or img.height > target_size:
-                        img.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
-                
-                # 3. Save as WebP
-                buf = BytesIO()
-                # WebP is faster to decode in browser and smaller on disk
-                img.save(buf, format="WEBP", quality=quality)
-                return buf.getvalue()
-        except Exception: 
-            return None
-
-    @staticmethod
-    def revert_action(action):
-        """Undoes move operations."""
-        if action['type'] == 'move' and os.path.exists(action['t_dst']):
-            shutil.move(action['t_dst'], action['t_src'])
-        elif action['type'] in ['unused', 'cat_move']:
-            if os.path.exists(action['t_dst']): shutil.move(action['t_dst'], action['t_src'])
-            if 'c_dst' in action and os.path.exists(action['c_dst']):
-                shutil.move(action['c_dst'], action['c_src'])
-            
-    @staticmethod
-    def get_processed_log():
-        """Retrieves history of processed files."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM processed_log")
-        rows = cursor.fetchall()
-        conn.close()
-        return {r[0]: {"cat": r[1], "action": r[2]} for r in rows}
-
-    @staticmethod
-    def fix_permissions(path):
-        """Forces file to be fully accessible (rwxrwxrwx)."""
-        try:
-            # 0o777 gives Read, Write, and Execute access to Owner, Group, and Others.
-            os.chmod(path, 0o777)
-        except Exception:
-            pass # Ignore errors if OS doesn't support chmod (e.g. some Windows setups)
-
-    @staticmethod
-    def commit_batch(file_list, output_root, cleanup_mode, operation="Copy"):
-        """Commits files and fixes permissions."""
-        data = SorterEngine.get_staged_data()
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        
-        if not os.path.exists(output_root): os.makedirs(output_root, exist_ok=True)
-        
-        for file_path in file_list:
-            if not os.path.exists(file_path): continue
-            
-            # --- CASE A: Tagged ---
-            if file_path in data and data[file_path]['marked']:
-                info = data[file_path]
-                final_dst = os.path.join(output_root, info['name'])
-                
-                # Collision Check
-                if os.path.exists(final_dst):
-                    root, ext = os.path.splitext(info['name'])
-                    c = 1
-                    while os.path.exists(final_dst):
-                         final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
-                         c += 1
-                
-                # Perform Action
-                if operation == "Copy":
-                    shutil.copy2(file_path, final_dst)
-                else:
-                    shutil.move(file_path, final_dst)
-
-                # --- FIX PERMISSIONS ---
-                SorterEngine.fix_permissions(final_dst)
-
-                # Update DB
-                cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
-                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
-                               (file_path, info['cat'], operation))
-                
-            # --- CASE B: Cleanup ---
-            elif cleanup_mode != "Keep":
-                if cleanup_mode == "Move to Unused":
-                    unused_dir = os.path.join(os.path.dirname(file_path), "unused")
-                    os.makedirs(unused_dir, exist_ok=True)
-                    dest_unused = os.path.join(unused_dir, os.path.basename(file_path))
+            with ui.row().classes('gap-2'):
+                # Jump to page button
+                if show_jump and path in state.all_images:
+                    def jump_to_image():
+                        img_idx = state.all_images.index(path)
+                        target_page = img_idx // state.page_size
+                        dialog.close()
+                        set_page(target_page)
+                        ui.notify(f"Jumped to page {target_page + 1}", type='info')
                     
-                    shutil.move(file_path, dest_unused)
-                    SorterEngine.fix_permissions(dest_unused) # Fix here too
+                    ui.button(icon='location_searching', on_click=jump_to_image) \
+                        .props('flat round dense color=blue') \
+                        .tooltip('Jump to image location')
+                
+                # Untag button
+                if show_untag:
+                    def untag_and_close():
+                        action_untag(path)
+                        dialog.close()
+                        ui.notify("Tag removed", type='positive')
                     
-                elif cleanup_mode == "Delete":
-                    os.remove(file_path)
+                    ui.button(icon='label_off', on_click=untag_and_close) \
+                        .props('flat round dense color=red') \
+                        .tooltip('Remove tag')
+                
+                ui.button(icon='close', on_click=dialog.close).props('flat round dense color=white')
         
-        conn.commit()
-        conn.close()
+        ui.image(f"/full_res?path={path}").classes('w-full h-auto object-contain max-h-[85vh]')
+    dialog.open()
 
-    @staticmethod
-    def rename_category(old_name, new_name):
-        """Renames a category and updates any staged images using it."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
+def render_sidebar():
+    """Render category management sidebar."""
+    state.sidebar_container.clear()
+    
+    with state.sidebar_container:
+        ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2 text-white')
         
-        # 1. Update Category Table
-        try:
-            cursor.execute("UPDATE categories SET name = ? WHERE name = ?", (new_name, old_name))
+        # Number grid (1-25)
+        with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
+            for i in range(1, 26):
+                is_used = i in state.index_map
+                color = 'green' if is_used else 'grey-9'
+                
+                def make_click_handler(num: int):
+                    def handler():
+                        if num in state.index_map:
+                            # Number is used - open preview
+                            img_path = state.index_map[num]
+                            is_staged = img_path in state.staged_data
+                            open_zoom_dialog(
+                                img_path, 
+                                f"{state.active_cat} #{num}",
+                                show_untag=is_staged,
+                                show_jump=True
+                            )
+                        else:
+                            # Number is free - set as next index
+                            state.next_index = num
+                            render_sidebar()
+                    return handler
+                
+                ui.button(str(i), on_click=make_click_handler(i)) \
+                  .props(f'color={color} size=sm flat') \
+                  .classes('w-full border border-gray-800')
+        
+        # Category selector
+        categories = state.get_categories()
+        
+        def on_category_change(e):
+            state.active_cat = e.value
+            refresh_staged_info()
+            render_sidebar()
+        
+        ui.select(
+            categories,
+            value=state.active_cat,
+            label="Active Category",
+            on_change=on_category_change
+        ).classes('w-full').props('dark outlined')
+        
+        # Add new category
+        with ui.row().classes('w-full items-center no-wrap mt-2'):
+            new_cat_input = ui.input(placeholder='New category...') \
+                .props('dense outlined dark').classes('flex-grow')
             
-            # 2. Update Staging Area (Keep tags in sync)
-            cursor.execute("UPDATE staging_area SET target_category = ? WHERE target_category = ?", (new_name, old_name))
+            def add_category():
+                if new_cat_input.value:
+                    SorterEngine.add_category(new_cat_input.value, state.profile_name)
+                    state.active_cat = new_cat_input.value
+                    refresh_staged_info()
+                    render_sidebar()
             
-            # 3. Update Staging Area Filenames (e.g. Action_001.jpg -> Adventure_001.jpg)
-            # This is complex in SQL, so we'll just flag them. 
-            # Ideally, we re-stage them, but for now, updating the category column is sufficient 
-            # because the filename is generated at the moment of tagging or commit.
+            ui.button(icon='add', on_click=add_category).props('flat color=green')
+        
+        # Delete category
+        with ui.expansion('Danger Zone', icon='warning').classes('w-full text-red-400 mt-2'):
+            def delete_category():
+                SorterEngine.delete_category(state.active_cat, state.profile_name)
+                refresh_staged_info()
+                render_sidebar()
             
-            conn.commit()
-        except sqlite3.IntegrityError:
-            # New name already exists
-            pass
-        finally:
-            conn.close()
+            ui.button('DELETE CATEGORY', color='red', on_click=delete_category).classes('w-full')
+        
+        ui.separator().classes('my-4 bg-gray-700')
+        
+        # Index counter
+        with ui.row().classes('w-full items-end no-wrap'):
+            ui.number(label="Next Index", min=1, precision=0) \
+                .bind_value(state, 'next_index') \
+                .classes('flex-grow').props('dark outlined')
+            
+            def reset_index():
+                state.next_index = (max(state.index_map.keys()) + 1) if state.index_map else 1
+                render_sidebar()
+            
+            ui.button('🔄', on_click=reset_index).props('flat color=white')
 
-    @staticmethod
-    def delete_category(name, profile=None):
-        """Deletes a category and clears any staged tags associated with it."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
+def render_gallery():
+    """Render image gallery grid."""
+    state.grid_container.clear()
+    batch = state.get_current_batch()
+    
+    with state.grid_container:
+        with ui.grid(columns=state.grid_cols).classes('w-full gap-3'):
+            for img_path in batch:
+                render_image_card(img_path)
+
+def render_image_card(img_path: str):
+    """Render individual image card."""
+    is_staged = img_path in state.staged_data
+    thumb_size = 800
+    
+    with ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow'):
+        # Header with filename and actions
+        with ui.row().classes('w-full justify-between no-wrap mb-1'):
+            ui.label(os.path.basename(img_path)[:15]).classes('text-xs text-gray-400 truncate')
+            with ui.row().classes('gap-0'):
+                ui.button(
+                    icon='zoom_in',
+                    on_click=lambda p=img_path: open_zoom_dialog(p)
+                ).props('flat size=sm dense color=white')
+                ui.button(
+                    icon='delete',
+                    on_click=lambda p=img_path: action_delete(p)
+                ).props('flat size=sm dense color=red')
         
-        if profile:
-            cursor.execute("DELETE FROM profile_categories WHERE profile = ? AND category = ?", (profile, name))
+        # Thumbnail
+        ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
+            .classes('w-full h-64 bg-black rounded') \
+            .props('fit=contain no-spinner')
+        
+        # Tagging UI
+        if is_staged:
+            info = state.staged_data[img_path]
+            idx = _extract_index(info['name'])
+            idx_str = str(idx) if idx else "?"
+            ui.label(f"🏷️ {info['cat']}").classes('text-center text-green-400 text-xs py-1 w-full')
+            ui.button(
+                f"Untag (#{idx_str})",
+                on_click=lambda p=img_path: action_untag(p)
+            ).props('flat color=grey-5 dense').classes('w-full')
         else:
-            cursor.execute("DELETE FROM categories WHERE name = ?", (name,))
-        
-        cursor.execute("DELETE FROM staging_area WHERE target_category = ?", (name,))
-        conn.commit()
-        conn.close()
+            with ui.row().classes('w-full no-wrap mt-2 gap-1'):
+                local_idx = ui.number(value=state.next_index, precision=0) \
+                    .props('dense dark outlined').classes('w-1/3')
+                ui.button(
+                    'Tag',
+                    on_click=lambda p=img_path, i=local_idx: action_tag(p, int(i.value))
+                ).classes('w-2/3').props('color=green dense')
 
-    # In engine.py / SorterEngine class
-    @staticmethod
-    def get_tagged_page_indices(all_images, page_size):
-        staged = SorterEngine.get_staged_data()
-        if not staged: return set()
-        tagged_pages = set()
-        staged_keys = set(staged.keys())
-        for idx, img_path in enumerate(all_images):
-            if img_path in staged_keys:
-                tagged_pages.add(idx // page_size)
-        return tagged_pages
+def render_pagination():
+    """Render pagination controls."""
+    state.pagination_container.clear()
+    
+    if state.total_pages <= 1:
+        return
+    
+    with state.pagination_container:
+        # Page slider
+        ui.slider(
+            min=0,
+            max=state.total_pages - 1,
+            value=state.page,
+            on_change=lambda e: set_page(int(e.value))
+        ).classes('w-1/2 mb-2').props('color=green')
+        
+        # Page buttons
+        with ui.row().classes('items-center gap-2'):
+            # Previous button
+            if state.page > 0:
+                ui.button('◀', on_click=lambda: set_page(state.page - 1)).props('flat color=white')
+            
+            # Page numbers (show current ±2)
+            start = max(0, state.page - 2)
+            end = min(state.total_pages, state.page + 3)
+            
+            for p in range(start, end):
+                dot = " 🟢" if p in state.green_dots else ""
+                color = "white" if p == state.page else "grey-6"
+                ui.button(
+                    f"{p+1}{dot}",
+                    on_click=lambda page=p: set_page(page)
+                ).props(f'flat color={color}')
+            
+            # Next button
+            if state.page < state.total_pages - 1:
+                ui.button('▶', on_click=lambda: set_page(state.page + 1)).props('flat color=white')
 
-    # --- 7. FOLDER TAG PERSISTENCE ---
-    @staticmethod
-    def save_folder_tags(folder_path, profile=None):
-        """
-        Saves current staging data associated with a folder for later restoration.
-        Call this BEFORE clearing the staging area.
-        """
-        import re
-        staged = SorterEngine.get_staged_data()
-        if not staged:
-            return 0
+def set_page(p: int):
+    """Navigate to specific page."""
+    state.page = max(0, min(p, state.total_pages - 1))
+    refresh_ui()
+
+def refresh_ui():
+    """Refresh all UI components."""
+    render_sidebar()
+    render_pagination()
+    render_gallery()
+
+def handle_keyboard(e):
+    """Handle keyboard navigation."""
+    if not e.action.keydown:
+        return
+    
+    if e.key.arrow_left and state.page > 0:
+        set_page(state.page - 1)
+    elif e.key.arrow_right and state.page < state.total_pages - 1:
+        set_page(state.page + 1)
+
+# ==========================================
+# MAIN LAYOUT
+# ==========================================
+
+def build_header():
+    """Build application header."""
+    with ui.header().classes('items-center bg-slate-900 text-white border-b border-gray-700').style('height: 70px'):
+        with ui.row().classes('w-full items-center gap-4 no-wrap px-4'):
+            ui.label('🖼️ NiceSorter').classes('text-xl font-bold shrink-0 text-green-400')
+            
+            # Profile selector with add/delete
+            def change_profile(e):
+                state.profile_name = e.value
+                state.load_active_profile()
+                state.active_cat = "control"  # Reset to default category
+                refresh_staged_info()
+                refresh_ui()
+            
+            profile_select = ui.select(
+                list(state.profiles.keys()), 
+                value=state.profile_name,
+                on_change=change_profile
+            ).props('dark dense options-dense borderless').classes('w-32')
+            
+            def add_profile():
+                with ui.dialog() as dialog, ui.card().classes('p-4'):
+                    ui.label('New Profile Name').classes('font-bold')
+                    name_input = ui.input(placeholder='Profile name').props('autofocus')
+                    
+                    def do_create():
+                        name = name_input.value
+                        if name and name not in state.profiles:
+                            state.profiles[name] = {"tab5_source": "/storage", "tab5_out": "/storage"}
+                            SorterEngine.save_tab_paths(name, t5_s="/storage", t5_o="/storage")
+                            state.profile_name = name
+                            state.load_active_profile()
+                            dialog.close()
+                            ui.notify(f"Profile '{name}' created", type='positive')
+                            # Rebuild header to update profile list
+                            ui.navigate.reload()
+                        elif name in state.profiles:
+                            ui.notify("Profile already exists", type='warning')
+                    
+                    with ui.row().classes('w-full justify-end gap-2 mt-2'):
+                        ui.button('Cancel', on_click=dialog.close).props('flat')
+                        ui.button('Create', on_click=do_create).props('color=green')
+                dialog.open()
+            
+            def delete_profile():
+                if len(state.profiles) <= 1:
+                    ui.notify("Cannot delete the last profile", type='warning')
+                    return
+                deleted_name = state.profile_name
+                del state.profiles[state.profile_name]
+                state.profile_name = list(state.profiles.keys())[0]
+                state.load_active_profile()
+                ui.notify(f"Profile '{deleted_name}' deleted", type='info')
+                ui.navigate.reload()
+            
+            ui.button(icon='add', on_click=add_profile).props('flat round dense color=green').tooltip('New profile')
+            ui.button(icon='delete', on_click=delete_profile).props('flat round dense color=red').tooltip('Delete profile')
+            
+            # Source and output paths
+            with ui.row().classes('flex-grow gap-2'):
+                ui.input('Input Base').bind_value(state, 'input_base') \
+                    .classes('flex-grow').props('dark dense outlined')
+                ui.input('Output Base').bind_value(state, 'output_base') \
+                    .classes('flex-grow').props('dark dense outlined')
+                ui.input('Folder (optional)').bind_value(state, 'folder_name') \
+                    .classes('flex-grow').props('dark dense outlined')
+            
+            ui.button(icon='save', on_click=state.save_current_profile) \
+                .props('flat round color=white')
+            ui.button('LOAD', on_click=load_images) \
+                .props('color=green flat').classes('font-bold border border-green-700')
+            
+            # View settings menu
+            with ui.button(icon='tune', color='white').props('flat round'):
+                with ui.menu().classes('bg-gray-800 text-white p-4'):
+                    ui.label('VIEW SETTINGS').classes('text-xs font-bold mb-2')
+                    
+                    ui.label('Grid Columns:')
+                    ui.slider(
+                        min=2, max=8, step=1,
+                        value=state.grid_cols,
+                        on_change=lambda e: (setattr(state, 'grid_cols', e.value), refresh_ui())
+                    ).props('color=green')
+                    
+                    ui.label('Preview Quality:')
+                    ui.slider(
+                        min=10, max=100, step=10,
+                        value=state.preview_quality,
+                        on_change=lambda e: (setattr(state, 'preview_quality', e.value), refresh_ui())
+                    ).props('color=green label-always')
+            
+            ui.switch('Dark', value=True, on_change=lambda e: ui.dark_mode().set_value(e.value)) \
+                .props('color=green')
+
+def build_sidebar():
+    """Build left sidebar."""
+    with ui.left_drawer(value=True).classes('bg-gray-950 p-4 border-r border-gray-800').props('width=320'):
+        state.sidebar_container = ui.column().classes('w-full')
+
+def build_main_content():
+    """Build main content area."""
+    with ui.column().classes('w-full p-6 bg-gray-900 min-h-screen text-white'):
+        state.pagination_container = ui.column().classes('w-full items-center mb-4')
+        state.grid_container = ui.column().classes('w-full')
         
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
+        # Footer with batch controls
+        ui.separator().classes('my-10 bg-gray-800')
         
-        # Ensure table exists with profile column
-        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-            (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-             PRIMARY KEY (profile, folder_path, filename))''')
-        
-        # Check if old schema (without profile) - migrate if needed
-        cursor.execute("PRAGMA table_info(folder_tags)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if 'profile' not in columns:
-            cursor.execute("DROP TABLE folder_tags")
-            cursor.execute('''CREATE TABLE folder_tags 
-                (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-                 PRIMARY KEY (profile, folder_path, filename))''')
-            conn.commit()
-        
-        profile = profile or "Default"
-        saved_count = 0
-        for orig_path, info in staged.items():
-            # Only save tags for files that are in this folder (or subfolders)
-            if orig_path.startswith(folder_path):
-                filename = os.path.basename(orig_path)
-                category = info['cat']
+        with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
+            # Tagged files mode
+            with ui.column():
+                ui.label('TAGGED FILES:').classes('text-gray-500 text-xs font-bold')
+                ui.radio(['Copy', 'Move'], value=state.batch_mode) \
+                    .bind_value(state, 'batch_mode') \
+                    .props('inline dark color=green')
+            
+            # Untagged files mode
+            with ui.column():
+                ui.label('UNTAGGED FILES:').classes('text-gray-500 text-xs font-bold')
+                ui.radio(['Keep', 'Move to Unused', 'Delete'], value=state.cleanup_mode) \
+                    .bind_value(state, 'cleanup_mode') \
+                    .props('inline dark color=green')
+            
+            # Action buttons
+            with ui.row().classes('items-center gap-6'):
+                ui.button('APPLY PAGE', on_click=action_apply_page) \
+                    .props('outline color=white lg')
                 
-                # Extract index from the new_name (e.g., "Action_042.jpg" -> 42)
-                new_name = info['name']
-                match = re.search(r'_(\d+)', new_name)
-                tag_index = int(match.group(1)) if match else 0
-                
-                cursor.execute(
-                    "INSERT OR REPLACE INTO folder_tags VALUES (?, ?, ?, ?, ?)",
-                    (profile, folder_path, filename, category, tag_index)
-                )
-                saved_count += 1
-        
-        conn.commit()
-        conn.close()
-        return saved_count
+                with ui.column().classes('items-center'):
+                    ui.button('APPLY GLOBAL', on_click=action_apply_global) \
+                        .props('lg color=red-900')
+                    ui.label('(Process All)').classes('text-xs text-gray-500')
 
-    @staticmethod
-    def restore_folder_tags(folder_path, all_images, profile=None):
-        """
-        Restores previously saved tags for a folder back into the staging area.
-        Call this when loading/reloading a folder.
-        Returns the number of tags restored.
-        """
-        try:
-            conn = sqlite3.connect(SorterEngine.DB_PATH)
-            cursor = conn.cursor()
-            
-            # Ensure table exists with profile column
-            cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-                (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-                 PRIMARY KEY (profile, folder_path, filename))''')
-            
-            # Check if old schema (without profile) - migrate if needed
-            cursor.execute("PRAGMA table_info(folder_tags)")
-            columns = [row[1] for row in cursor.fetchall()]
-            if 'profile' not in columns:
-                cursor.execute("DROP TABLE folder_tags")
-                cursor.execute('''CREATE TABLE folder_tags 
-                    (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-                     PRIMARY KEY (profile, folder_path, filename))''')
-                conn.commit()
-            
-            profile = profile or "Default"
-            
-            # Get saved tags for this folder and profile
-            cursor.execute(
-                "SELECT filename, category, tag_index FROM folder_tags WHERE profile = ? AND folder_path = ?",
-                (profile, folder_path)
-            )
-            saved_tags = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
-            
-            if not saved_tags:
-                conn.close()
-                return 0
-            
-            # Build a map of filename -> full path from current images
-            filename_to_path = {}
-            for img_path in all_images:
-                fname = os.path.basename(img_path)
-                if fname not in filename_to_path:
-                    filename_to_path[fname] = img_path
-            
-            # Restore tags to staging area
-            restored = 0
-            for filename, tag_info in saved_tags.items():
-                if filename in filename_to_path:
-                    full_path = filename_to_path[filename]
-                    cursor.execute("SELECT 1 FROM staging_area WHERE original_path = ?", (full_path,))
-                    if not cursor.fetchone():
-                        ext = os.path.splitext(filename)[1]
-                        new_name = f"{tag_info['cat']}_{tag_info['index']:03d}{ext}"
-                        cursor.execute(
-                            "INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)",
-                            (full_path, tag_info['cat'], new_name)
-                        )
-                        restored += 1
-            
-            conn.commit()
-            conn.close()
-            return restored
-        except Exception as e:
-            print(f"Error restoring folder tags: {e}")
-            return 0
+# ==========================================
+# INITIALIZATION
+# ==========================================
 
-    @staticmethod
-    def clear_folder_tags(folder_path):
-        """Clears saved tags for a specific folder."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM folder_tags WHERE folder_path = ?", (folder_path,))
-        conn.commit()
-        conn.close()
+build_header()
+build_sidebar()
+build_main_content()
 
-    @staticmethod
-    def get_saved_folder_tags(folder_path):
-        """Returns saved tags for a folder (for debugging/display)."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT filename, category, tag_index FROM folder_tags WHERE folder_path = ?",
-            (folder_path,)
-        )
-        result = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
-        conn.close()
-        return result
+ui.keyboard(on_key=handle_keyboard)
+ui.dark_mode().enable()
+load_images()
+
+ui.run(title="NiceSorter", host="0.0.0.0", port=8080, reload=False)
