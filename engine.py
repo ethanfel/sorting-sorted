@@ -36,6 +36,16 @@ class SorterEngine:
         cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
             (profile TEXT, category TEXT, PRIMARY KEY (profile, category))''')
         
+        # --- NEW: PAIRING SETTINGS TABLE ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS pairing_settings 
+            (profile TEXT PRIMARY KEY, 
+             adjacent_folder TEXT, 
+             main_category TEXT, 
+             adj_category TEXT, 
+             main_output TEXT, 
+             adj_output TEXT, 
+             time_window INTEGER)''')
+        
         # Seed categories if empty (legacy table)
         cursor.execute("SELECT COUNT(*) FROM categories")
         if cursor.fetchone()[0] == 0:
@@ -47,10 +57,14 @@ class SorterEngine:
 
     # --- 2. PROFILE & PATH MANAGEMENT ---
     @staticmethod
-    def save_tab_paths(profile_name, t1_t=None, t2_t=None, t2_c=None, t4_s=None, t4_o=None, mode=None, t5_s=None, t5_o=None):
+    def save_tab_paths(profile_name, t1_t=None, t2_t=None, t2_c=None, t4_s=None, t4_o=None, mode=None, t5_s=None, t5_o=None,
+                       pair_adjacent_folder=None, pair_main_category=None, pair_adj_category=None, 
+                       pair_main_output=None, pair_adj_output=None, pair_time_window=None):
         """Updates specific tab paths in the database while preserving others."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
+        
+        # Save main profile settings
         cursor.execute("SELECT * FROM profiles WHERE name = ?", (profile_name,))
         row = cursor.fetchone()
         
@@ -70,6 +84,38 @@ class SorterEngine:
             t5_o if t5_o is not None else row[8]
         )
         cursor.execute("INSERT OR REPLACE INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", new_values)
+        
+        # Save pairing settings if any are provided
+        if any(x is not None for x in [pair_adjacent_folder, pair_main_category, pair_adj_category, 
+                                        pair_main_output, pair_adj_output, pair_time_window]):
+            # Ensure table exists
+            cursor.execute('''CREATE TABLE IF NOT EXISTS pairing_settings 
+                (profile TEXT PRIMARY KEY, 
+                 adjacent_folder TEXT, 
+                 main_category TEXT, 
+                 adj_category TEXT, 
+                 main_output TEXT, 
+                 adj_output TEXT, 
+                 time_window INTEGER)''')
+            
+            # Get existing values
+            cursor.execute("SELECT * FROM pairing_settings WHERE profile = ?", (profile_name,))
+            pair_row = cursor.fetchone()
+            
+            if not pair_row:
+                pair_row = (profile_name, "", "control", "control", "/storage", "/storage", 60)
+            
+            pair_values = (
+                profile_name,
+                pair_adjacent_folder if pair_adjacent_folder is not None else pair_row[1],
+                pair_main_category if pair_main_category is not None else pair_row[2],
+                pair_adj_category if pair_adj_category is not None else pair_row[3],
+                pair_main_output if pair_main_output is not None else pair_row[4],
+                pair_adj_output if pair_adj_output is not None else pair_row[5],
+                pair_time_window if pair_time_window is not None else pair_row[6]
+            )
+            cursor.execute("INSERT OR REPLACE INTO pairing_settings VALUES (?, ?, ?, ?, ?, ?, ?)", pair_values)
+        
         conn.commit()
         conn.close()
     @staticmethod
@@ -100,17 +146,44 @@ class SorterEngine:
 
     @staticmethod
     def load_profiles():
-        """Loads all workspace presets."""
+        """Loads all workspace presets including pairing settings."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM profiles")
         rows = cursor.fetchall()
+        
+        # Ensure pairing_settings table exists
+        cursor.execute('''CREATE TABLE IF NOT EXISTS pairing_settings 
+            (profile TEXT PRIMARY KEY, 
+             adjacent_folder TEXT, 
+             main_category TEXT, 
+             adj_category TEXT, 
+             main_output TEXT, 
+             adj_output TEXT, 
+             time_window INTEGER)''')
+        
+        profiles = {}
+        for r in rows:
+            profile_name = r[0]
+            profiles[profile_name] = {
+                "tab1_target": r[1], "tab2_target": r[2], "tab2_control": r[3], 
+                "tab4_source": r[4], "tab4_out": r[5], "mode": r[6],
+                "tab5_source": r[7], "tab5_out": r[8]
+            }
+            
+            # Load pairing settings for this profile
+            cursor.execute("SELECT * FROM pairing_settings WHERE profile = ?", (profile_name,))
+            pair_row = cursor.fetchone()
+            if pair_row:
+                profiles[profile_name]["pair_adjacent_folder"] = pair_row[1] or ""
+                profiles[profile_name]["pair_main_category"] = pair_row[2] or "control"
+                profiles[profile_name]["pair_adj_category"] = pair_row[3] or "control"
+                profiles[profile_name]["pair_main_output"] = pair_row[4] or "/storage"
+                profiles[profile_name]["pair_adj_output"] = pair_row[5] or "/storage"
+                profiles[profile_name]["pair_time_window"] = pair_row[6] or 60
+        
         conn.close()
-        return {r[0]: {
-            "tab1_target": r[1], "tab2_target": r[2], "tab2_control": r[3], 
-            "tab4_source": r[4], "tab4_out": r[5], "mode": r[6],
-            "tab5_source": r[7], "tab5_out": r[8]
-        } for r in rows}
+        return profiles
 
     # --- 3. CATEGORY MANAGEMENT (Profile-based) ---
     @staticmethod
