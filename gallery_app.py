@@ -70,6 +70,9 @@ class AppState:
         self.pair_main_output = "/storage"   # Output folder for main images
         self.pair_adj_output = "/storage"    # Output folder for adjacent images
         self.pair_index = 1  # Shared index for both sides
+        
+        # Pairing mode index maps (index -> (main_path, adj_path))
+        self.pair_index_map: Dict[int, Dict] = {}  # {idx: {"main": path, "adj": path}}
 
     def load_active_profile(self):
         """Load paths from active profile."""
@@ -234,12 +237,20 @@ def get_file_timestamp(filepath: str) -> Optional[float]:
         return None
 
 def load_adjacent_folder():
-    """Load images from adjacent folder for pairing."""
+    """Load images from adjacent folder for pairing, excluding main folder."""
     if not state.pair_adjacent_folder or not os.path.exists(state.pair_adjacent_folder):
         state.pair_adjacent_images = []
+        ui.notify("Adjacent folder path is empty or doesn't exist", type='warning')
         return
     
-    state.pair_adjacent_images = SorterEngine.get_images(state.pair_adjacent_folder, recursive=True)
+    # Exclude the main source folder to avoid duplicates
+    exclude = [state.source_dir] if state.source_dir else []
+    
+    state.pair_adjacent_images = SorterEngine.get_images(
+        state.pair_adjacent_folder, 
+        recursive=True, 
+        exclude_paths=exclude
+    )
     ui.notify(f"Loaded {len(state.pair_adjacent_images)} images from adjacent folder", type='info')
 
 def find_time_matches(source_image: str) -> List[str]:
@@ -459,7 +470,7 @@ def refresh_staged_info():
         if img_path in staged_keys:
             state.green_dots.add(idx // state.page_size)
     
-    # Build index map for active category
+    # Build index map for active category (gallery mode)
     state.index_map.clear()
     
     # Add staged images
@@ -477,6 +488,23 @@ def refresh_staged_info():
                 idx = _extract_index(filename)
                 if idx is not None and idx not in state.index_map:
                     state.index_map[idx] = os.path.join(cat_path, filename)
+    
+    # Build pairing mode index map (both categories)
+    state.pair_index_map.clear()
+    
+    for orig_path, info in state.staged_data.items():
+        idx = _extract_index(info['name'])
+        if idx is None:
+            continue
+        
+        if idx not in state.pair_index_map:
+            state.pair_index_map[idx] = {"main": None, "adj": None}
+        
+        # Check if this is from main or adjacent category
+        if info['cat'] == state.pair_main_category:
+            state.pair_index_map[idx]["main"] = orig_path
+        elif info['cat'] == state.pair_adj_category:
+            state.pair_index_map[idx]["adj"] = orig_path
 
 def _extract_index(filename: str) -> Optional[int]:
     """Extract numeric index from filename (e.g., 'Cat_042.jpg' -> 42)."""
@@ -663,6 +691,57 @@ def open_zoom_dialog(path: str, title: Optional[str] = None, show_untag: bool = 
         ui.image(f"/full_res?path={path}").classes('w-full h-auto object-contain max-h-[85vh]')
     dialog.open()
 
+def open_pair_preview_dialog(index: int, pair_info: Dict):
+    """Open dialog showing both main and adjacent images for a paired index."""
+    main_path = pair_info.get("main")
+    adj_path = pair_info.get("adj")
+    
+    with ui.dialog() as dialog, ui.card().classes('w-full max-w-screen-xl p-4 bg-gray-900'):
+        with ui.row().classes('w-full justify-between items-center mb-4'):
+            ui.label(f"Pair #{index}").classes('text-xl font-bold text-white')
+            ui.button(icon='close', on_click=dialog.close).props('flat round dense color=white')
+        
+        with ui.row().classes('w-full gap-4'):
+            # Main image
+            with ui.card().classes('flex-1 p-4 bg-gray-800'):
+                ui.label(f"📁 {state.pair_main_category}").classes('text-lg font-bold text-blue-400 mb-2')
+                if main_path:
+                    ui.label(os.path.basename(main_path)).classes('text-xs text-gray-400 truncate mb-2')
+                    ui.image(f"/thumbnail?path={main_path}&size=600&q=80") \
+                        .classes('w-full h-64 bg-black rounded') \
+                        .props('fit=contain')
+                    
+                    def untag_main():
+                        action_untag(main_path)
+                        dialog.close()
+                        render_sidebar()
+                    
+                    ui.button("Untag", icon='label_off', on_click=untag_main) \
+                        .props('flat color=red').classes('mt-2')
+                else:
+                    ui.label("No image").classes('text-gray-500 text-center py-20')
+            
+            # Adjacent image
+            with ui.card().classes('flex-1 p-4 bg-gray-800'):
+                ui.label(f"📂 {state.pair_adj_category}").classes('text-lg font-bold text-orange-400 mb-2')
+                if adj_path:
+                    ui.label(os.path.basename(adj_path)).classes('text-xs text-gray-400 truncate mb-2')
+                    ui.image(f"/thumbnail?path={adj_path}&size=600&q=80") \
+                        .classes('w-full h-64 bg-black rounded') \
+                        .props('fit=contain')
+                    
+                    def untag_adj():
+                        action_untag(adj_path)
+                        dialog.close()
+                        render_sidebar()
+                    
+                    ui.button("Untag", icon='label_off', on_click=untag_adj) \
+                        .props('flat color=red').classes('mt-2')
+                else:
+                    ui.label("No image").classes('text-gray-500 text-center py-20')
+    
+    dialog.open()
+
 def open_hotkey_dialog(category: str):
     """Open dialog to set/change hotkey for a category."""
     # Find current hotkey if any
@@ -730,33 +809,75 @@ def render_sidebar():
     with state.sidebar_container:
         ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2 text-white')
         
-        # Number grid (1-25)
-        with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
-            for i in range(1, 26):
-                is_used = i in state.index_map
-                color = 'green' if is_used else 'grey-9'
-                
-                def make_click_handler(num: int):
-                    def handler():
-                        if num in state.index_map:
-                            # Number is used - open preview
-                            img_path = state.index_map[num]
-                            is_staged = img_path in state.staged_data
-                            open_zoom_dialog(
-                                img_path, 
-                                f"{state.active_cat} #{num}",
-                                show_untag=is_staged,
-                                show_jump=True
-                            )
-                        else:
-                            # Number is free - set as next index
-                            state.next_index = num
-                            render_sidebar()
-                    return handler
-                
-                ui.button(str(i), on_click=make_click_handler(i)) \
-                  .props(f'color={color} size=sm flat') \
-                  .classes('w-full border border-gray-800')
+        # Number grid (1-25) - different view for pairing mode
+        if state.current_mode == "pairing":
+            # Pairing mode: show both main and adjacent in grid
+            ui.label(f"Index Grid ({state.pair_main_category} + {state.pair_adj_category})").classes('text-xs text-gray-400 mb-1')
+            with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
+                for i in range(1, 26):
+                    pair_info = state.pair_index_map.get(i, {})
+                    has_main = pair_info.get("main") is not None
+                    has_adj = pair_info.get("adj") is not None
+                    
+                    # Color coding: green=both, blue=main only, orange=adj only, grey=none
+                    if has_main and has_adj:
+                        color = 'green'
+                    elif has_main:
+                        color = 'blue'
+                    elif has_adj:
+                        color = 'orange'
+                    else:
+                        color = 'grey-9'
+                    
+                    def make_pair_click_handler(num: int):
+                        def handler():
+                            pair_info = state.pair_index_map.get(num, {})
+                            if pair_info.get("main") or pair_info.get("adj"):
+                                # Show dialog with both images
+                                open_pair_preview_dialog(num, pair_info)
+                            else:
+                                # Number is free - set as next index
+                                state.pair_index = num
+                                render_sidebar()
+                        return handler
+                    
+                    ui.button(str(i), on_click=make_pair_click_handler(i)) \
+                      .props(f'color={color} size=sm flat') \
+                      .classes('w-full border border-gray-800')
+            
+            # Legend
+            with ui.row().classes('w-full gap-2 text-xs mb-4'):
+                ui.label("🟢 Both").classes('text-green-400')
+                ui.label("🔵 Main").classes('text-blue-400')
+                ui.label("🟠 Adj").classes('text-orange-400')
+        else:
+            # Gallery mode: show single category
+            with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
+                for i in range(1, 26):
+                    is_used = i in state.index_map
+                    color = 'green' if is_used else 'grey-9'
+                    
+                    def make_click_handler(num: int):
+                        def handler():
+                            if num in state.index_map:
+                                # Number is used - open preview
+                                img_path = state.index_map[num]
+                                is_staged = img_path in state.staged_data
+                                open_zoom_dialog(
+                                    img_path, 
+                                    f"{state.active_cat} #{num}",
+                                    show_untag=is_staged,
+                                    show_jump=True
+                                )
+                            else:
+                                # Number is free - set as next index
+                                state.next_index = num
+                                render_sidebar()
+                        return handler
+                    
+                    ui.button(str(i), on_click=make_click_handler(i)) \
+                      .props(f'color={color} size=sm flat') \
+                      .classes('w-full border border-gray-800')
         
         # Category Manager (expanded)
         ui.label("📂 Categories").classes('text-sm font-bold text-gray-400 mt-2')
