@@ -849,16 +849,19 @@ def build_header():
                 
                 state.profile_name = e.value
                 state.load_active_profile()
-                state.active_cat = "control"  # Reset to default category
-                SorterEngine.clear_staging_area()  # Clear staging for new profile
                 
-                # Auto-load if source path exists
-                if os.path.exists(state.source_dir):
-                    load_images()
-                else:
-                    state.all_images = []
-                    refresh_staged_info()
-                    refresh_ui()
+                # Reset to first available category for new profile
+                cats = state.get_categories()
+                state.active_cat = cats[0] if cats else "control"
+                
+                # Clear staging and hotkeys for new profile
+                SorterEngine.clear_staging_area()
+                state.category_hotkeys = {}  # Reset hotkeys when switching profile
+                state.all_images = []
+                state.staged_data = {}
+                
+                refresh_staged_info()
+                refresh_ui()
             
             profile_select = ui.select(
                 list(state.profiles.keys()), 
