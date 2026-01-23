@@ -53,6 +53,16 @@ class AppState:
         self.sidebar_container = None
         self.grid_container = None
         self.pagination_container = None
+        
+        # === PAIRING MODE STATE ===
+        self.current_mode = "gallery"  # "gallery" or "pairing"
+        self.pair_time_window = 60  # seconds +/- for matching
+        self.pair_current_idx = 0  # Current image index in pairing mode
+        self.pair_adjacent_folder = ""  # Path to adjacent folder
+        self.pair_adjacent_images: List[str] = []  # Images from adjacent folder
+        self.pair_matches: List[str] = []  # Current matches for selected image
+        self.pair_selected_match = None  # Currently selected match
+        self.pairing_container = None  # UI container for pairing mode
 
     def load_active_profile(self):
         """Load paths from active profile."""
@@ -175,6 +185,183 @@ def load_images():
     
     refresh_staged_info()
     refresh_ui()
+
+# ==========================================
+# PAIRING MODE FUNCTIONS
+# ==========================================
+
+def get_file_timestamp(filepath: str) -> Optional[float]:
+    """Get file modification timestamp."""
+    try:
+        return os.path.getmtime(filepath)
+    except:
+        return None
+
+def load_adjacent_folder():
+    """Load images from adjacent folder for pairing."""
+    if not state.pair_adjacent_folder or not os.path.exists(state.pair_adjacent_folder):
+        state.pair_adjacent_images = []
+        return
+    
+    state.pair_adjacent_images = SorterEngine.get_images(state.pair_adjacent_folder, recursive=True)
+    ui.notify(f"Loaded {len(state.pair_adjacent_images)} images from adjacent folder", type='info')
+
+def find_time_matches(source_image: str) -> List[str]:
+    """Find images in adjacent folder within time window of source image."""
+    source_time = get_file_timestamp(source_image)
+    if source_time is None:
+        return []
+    
+    matches = []
+    for adj_image in state.pair_adjacent_images:
+        adj_time = get_file_timestamp(adj_image)
+        if adj_time is not None:
+            time_diff = abs(source_time - adj_time)
+            if time_diff <= state.pair_time_window:
+                matches.append((adj_image, time_diff))
+    
+    # Sort by time difference (closest first)
+    matches.sort(key=lambda x: x[1])
+    return [m[0] for m in matches]
+
+def pair_navigate(direction: int):
+    """Navigate to next/previous image in pairing mode."""
+    if not state.all_images:
+        render_pairing_view()  # Still render to show "no images" message
+        return
+    
+    state.pair_current_idx = max(0, min(state.pair_current_idx + direction, len(state.all_images) - 1))
+    
+    # Find matches for current image
+    current_img = state.all_images[state.pair_current_idx]
+    state.pair_matches = find_time_matches(current_img)
+    state.pair_selected_match = state.pair_matches[0] if state.pair_matches else None
+    
+    render_pairing_view()
+
+def pair_tag_both():
+    """Tag both the current image and selected match with same index."""
+    if not state.all_images:
+        return
+    
+    current_img = state.all_images[state.pair_current_idx]
+    
+    # Tag the main image
+    action_tag(current_img)
+    used_idx = state.next_index - 1  # action_tag increments, so get the one just used
+    
+    # Tag the match with same index if selected
+    if state.pair_selected_match:
+        ext = os.path.splitext(state.pair_selected_match)[1]
+        name = f"{state.active_cat}_{used_idx:03d}{ext}"
+        SorterEngine.stage_image(state.pair_selected_match, state.active_cat, name)
+        ui.notify(f"Tagged pair as {state.active_cat} #{used_idx}", type='positive')
+    
+    refresh_staged_info()
+    render_pairing_view()
+
+def render_pairing_view():
+    """Render the pairing comparison view."""
+    if state.pairing_container is None:
+        return
+    
+    state.pairing_container.clear()
+    
+    with state.pairing_container:
+        if not state.all_images:
+            ui.label("No images loaded. Set paths and click LOAD.").classes('text-gray-400')
+            return
+        
+        current_img = state.all_images[state.pair_current_idx]
+        is_main_staged = current_img in state.staged_data
+        
+        # Navigation bar
+        with ui.row().classes('w-full justify-center items-center gap-4 mb-4'):
+            ui.button(icon='arrow_back', on_click=lambda: pair_navigate(-1)) \
+                .props('flat color=white').tooltip('Previous (←)')
+            ui.label(f"{state.pair_current_idx + 1} / {len(state.all_images)}").classes('text-xl')
+            ui.button(icon='arrow_forward', on_click=lambda: pair_navigate(1)) \
+                .props('flat color=white').tooltip('Next (→)')
+            
+            ui.label("|").classes('text-gray-600 mx-2')
+            
+            # Tag both button
+            ui.button("TAG PAIR", icon='label', on_click=pair_tag_both) \
+                .props('color=green').classes('ml-4')
+            
+            # Time window setting
+            ui.number(label="±sec", value=state.pair_time_window, min=1, max=300,
+                     on_change=lambda e: (setattr(state, 'pair_time_window', int(e.value)), 
+                                         pair_navigate(0))) \
+                .props('dense dark outlined').classes('w-24')
+        
+        # Split view
+        with ui.row().classes('w-full gap-4'):
+            # Left side - Main image
+            with ui.card().classes('flex-1 p-4 bg-gray-800'):
+                ui.label("📁 Main Folder").classes('text-lg font-bold text-blue-400 mb-2')
+                ui.label(os.path.basename(current_img)).classes('text-xs text-gray-400 truncate mb-2')
+                
+                # Timestamp
+                ts = get_file_timestamp(current_img)
+                if ts:
+                    from datetime import datetime
+                    ui.label(f"⏱ {datetime.fromtimestamp(ts).strftime('%H:%M:%S')}") \
+                        .classes('text-xs text-gray-500 mb-2')
+                
+                ui.image(f"/thumbnail?path={current_img}&size=800&q={state.preview_quality}") \
+                    .classes('w-full h-96 bg-black rounded') \
+                    .props('fit=contain')
+                
+                if is_main_staged:
+                    info = state.staged_data[current_img]
+                    ui.label(f"🏷️ {info['cat']} - {info['name']}").classes('text-green-400 mt-2')
+                else:
+                    ui.label("Not tagged").classes('text-gray-500 mt-2')
+            
+            # Right side - Matches from adjacent folder
+            with ui.card().classes('flex-1 p-4 bg-gray-800'):
+                ui.label("📂 Adjacent Folder").classes('text-lg font-bold text-orange-400 mb-2')
+                
+                if not state.pair_adjacent_folder:
+                    ui.label("Set adjacent folder path above").classes('text-gray-500')
+                elif not state.pair_matches:
+                    ui.label("No matches within time window").classes('text-gray-500')
+                else:
+                    ui.label(f"{len(state.pair_matches)} matches found").classes('text-xs text-gray-400 mb-2')
+                    
+                    # Show matches as selectable thumbnails
+                    with ui.scroll_area().classes('w-full h-96'):
+                        for match_img in state.pair_matches[:10]:  # Limit to 10 matches
+                            is_selected = match_img == state.pair_selected_match
+                            is_match_staged = match_img in state.staged_data
+                            
+                            with ui.card().classes(
+                                f'p-2 mb-2 cursor-pointer {"border-2 border-green-500" if is_selected else "border border-gray-700"}'
+                            ).on('click', lambda m=match_img: select_match(m)):
+                                ui.label(os.path.basename(match_img)).classes('text-xs text-gray-400 truncate')
+                                
+                                # Timestamp and time diff
+                                match_ts = get_file_timestamp(match_img)
+                                if match_ts and ts:
+                                    from datetime import datetime
+                                    diff = match_ts - ts
+                                    sign = "+" if diff >= 0 else ""
+                                    ui.label(f"⏱ {datetime.fromtimestamp(match_ts).strftime('%H:%M:%S')} ({sign}{diff:.1f}s)") \
+                                        .classes('text-xs text-gray-500')
+                                
+                                ui.image(f"/thumbnail?path={match_img}&size=400&q=50") \
+                                    .classes('w-full h-32 bg-black rounded') \
+                                    .props('fit=contain')
+                                
+                                if is_match_staged:
+                                    info = state.staged_data[match_img]
+                                    ui.label(f"🏷️ {info['cat']}").classes('text-green-400 text-xs')
+
+def select_match(match_path: str):
+    """Select a match image."""
+    state.pair_selected_match = match_path
+    render_pairing_view()
 
 def refresh_staged_info():
     """Update staged data and index maps."""
@@ -747,14 +934,31 @@ def handle_keyboard(e):
     ctrl = e.modifiers.ctrl if hasattr(e.modifiers, 'ctrl') else False
     key_lower = key.lower() if isinstance(key, str) else key
     
-    # Navigation - arrow keys
-    if key == 'ArrowLeft' and state.page > 0:
-        set_page(state.page - 1)
-    elif key == 'ArrowRight' and state.page < state.total_pages - 1:
-        set_page(state.page + 1)
+    # Mode-specific navigation
+    if state.current_mode == "pairing":
+        # Pairing mode navigation
+        if key == 'ArrowLeft':
+            pair_navigate(-1)
+            return
+        elif key == 'ArrowRight':
+            pair_navigate(1)
+            return
+        elif key == 'Enter' or key == ' ':
+            pair_tag_both()
+            return
+    else:
+        # Gallery mode navigation
+        if key == 'ArrowLeft' and state.page > 0:
+            set_page(state.page - 1)
+            return
+        elif key == 'ArrowRight' and state.page < state.total_pages - 1:
+            set_page(state.page + 1)
+            return
+    
+    # Common shortcuts for both modes
     
     # Undo (Ctrl+Z)
-    elif key_lower == 'z' and ctrl:
+    if key_lower == 'z' and ctrl:
         action_undo()
     
     # Save (Ctrl+S)
@@ -765,71 +969,36 @@ def handle_keyboard(e):
     elif not ctrl and len(key) == 1 and key_lower.isalpha() and key_lower in state.category_hotkeys:
         state.active_cat = state.category_hotkeys[key_lower]
         refresh_staged_info()
-        refresh_ui()
+        if state.current_mode == "gallery":
+            refresh_ui()
+        else:
+            render_pairing_view()
         ui.notify(f"Category: {state.active_cat}", type='info')
     
-    # Number keys 1-9 to tag hovered image
-    elif key in '123456789' and not ctrl:
-        if state.hovered_image and state.hovered_image not in state.staged_data:
-            action_tag(state.hovered_image, int(key))
-    
-    # 0 key to tag with next_index
-    elif key == '0' and not ctrl and state.hovered_image and state.hovered_image not in state.staged_data:
-        action_tag(state.hovered_image)
-    
-    # U to untag hovered image (only if not assigned as category hotkey)
-    elif key_lower == 'u' and not ctrl and 'u' not in state.category_hotkeys:
-        if state.hovered_image and state.hovered_image in state.staged_data:
-            action_untag(state.hovered_image)
-    
-    # F to cycle filter modes (only if not assigned as category hotkey)
-    elif key_lower == 'f' and not ctrl and 'f' not in state.category_hotkeys:
-        modes = ["all", "untagged", "tagged"]
-        current_idx = modes.index(state.filter_mode)
-        state.filter_mode = modes[(current_idx + 1) % 3]
-        state.page = 0  # Reset to first page when changing filter
-        refresh_ui()
-        ui.notify(f"Filter: {state.filter_mode}", type='info')
-
-def process_key(key: str, ctrl: bool):
-    """Process keyboard input from JS event."""
-    # Navigation
-    if key == 'arrowleft' and state.page > 0:
-        set_page(state.page - 1)
-    elif key == 'arrowright' and state.page < state.total_pages - 1:
-        set_page(state.page + 1)
-    # Undo
-    elif key == 'z' and ctrl:
-        action_undo()
-    # Save
-    elif key == 's' and ctrl:
-        action_save_tags()
-    # Custom category hotkeys
-    elif not ctrl and len(key) == 1 and key.isalpha() and key in state.category_hotkeys:
-        state.active_cat = state.category_hotkeys[key]
-        refresh_staged_info()
-        refresh_ui()
-        ui.notify(f"Category: {state.active_cat}", type='info')
-    # Tag with number
-    elif key in '123456789' and not ctrl:
-        if state.hovered_image and state.hovered_image not in state.staged_data:
-            action_tag(state.hovered_image, int(key))
-    # Tag with next index
-    elif key == '0' and not ctrl:
-        if state.hovered_image and state.hovered_image not in state.staged_data:
+    # Gallery mode only shortcuts
+    elif state.current_mode == "gallery":
+        # Number keys 1-9 to tag hovered image
+        if key in '123456789' and not ctrl:
+            if state.hovered_image and state.hovered_image not in state.staged_data:
+                action_tag(state.hovered_image, int(key))
+        
+        # 0 key to tag with next_index
+        elif key == '0' and not ctrl and state.hovered_image and state.hovered_image not in state.staged_data:
             action_tag(state.hovered_image)
-    # Untag (only if 'u' not assigned to category)
-    elif key == 'u' and not ctrl and 'u' not in state.category_hotkeys:
-        if state.hovered_image and state.hovered_image in state.staged_data:
-            action_untag(state.hovered_image)
-    # Filter (only if 'f' not assigned to category)
-    elif key == 'f' and not ctrl and 'f' not in state.category_hotkeys:
-        modes = ["all", "untagged", "tagged"]
-        current_idx = modes.index(state.filter_mode)
-        state.filter_mode = modes[(current_idx + 1) % 3]
-        state.page = 0
-        refresh_ui()
-        ui.notify(f"Filter: {state.filter_mode}", type='info')
+        
+        # U to untag hovered image (only if not assigned as category hotkey)
+        elif key_lower == 'u' and not ctrl and 'u' not in state.category_hotkeys:
+            if state.hovered_image and state.hovered_image in state.staged_data:
+                action_untag(state.hovered_image)
+        
+        # F to cycle filter modes (only if not assigned as category hotkey)
+        elif key_lower == 'f' and not ctrl and 'f' not in state.category_hotkeys:
+            modes = ["all", "untagged", "tagged"]
+            current_idx = modes.index(state.filter_mode)
+            state.filter_mode = modes[(current_idx + 1) % 3]
+            state.page = 0  # Reset to first page when changing filter
+            refresh_ui()
+            ui.notify(f"Filter: {state.filter_mode}", type='info')
 
 # ==========================================
 # MAIN LAYOUT
@@ -949,38 +1118,82 @@ def build_sidebar():
         state.sidebar_container = ui.column().classes('w-full')
 
 def build_main_content():
-    """Build main content area."""
-    with ui.column().classes('w-full p-6 bg-gray-900 min-h-screen text-white'):
-        state.pagination_container = ui.column().classes('w-full items-center mb-4')
-        state.grid_container = ui.column().classes('w-full')
+    """Build main content area with tabs."""
+    with ui.column().classes('w-full bg-gray-900 min-h-screen text-white'):
+        # Mode tabs
+        with ui.tabs().classes('w-full bg-gray-800') as tabs:
+            gallery_tab = ui.tab('Gallery', icon='grid_view')
+            pairing_tab = ui.tab('Pairing', icon='compare')
         
-        # Footer with batch controls
-        ui.separator().classes('my-10 bg-gray-800')
-        
-        with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
-            # Tagged files mode
-            with ui.column():
-                ui.label('TAGGED FILES:').classes('text-gray-500 text-xs font-bold')
-                ui.radio(['Copy', 'Move'], value=state.batch_mode) \
-                    .bind_value(state, 'batch_mode') \
-                    .props('inline dark color=green')
-            
-            # Untagged files mode
-            with ui.column():
-                ui.label('UNTAGGED FILES:').classes('text-gray-500 text-xs font-bold')
-                ui.radio(['Keep', 'Move to Unused', 'Delete'], value=state.cleanup_mode) \
-                    .bind_value(state, 'cleanup_mode') \
-                    .props('inline dark color=green')
-            
-            # Action buttons
-            with ui.row().classes('items-center gap-6'):
-                ui.button('APPLY PAGE', on_click=action_apply_page) \
-                    .props('outline color=white lg')
+        with ui.tab_panels(tabs, value=gallery_tab).classes('w-full'):
+            # Gallery Mode Panel
+            with ui.tab_panel(gallery_tab).classes('p-6'):
+                state.pagination_container = ui.column().classes('w-full items-center mb-4')
+                state.grid_container = ui.column().classes('w-full')
                 
-                with ui.column().classes('items-center'):
-                    ui.button('APPLY GLOBAL', on_click=action_apply_global) \
-                        .props('lg color=red-900')
-                    ui.label('(Process All)').classes('text-xs text-gray-500')
+                # Footer with batch controls
+                ui.separator().classes('my-10 bg-gray-800')
+                
+                with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
+                    # Tagged files mode
+                    with ui.column():
+                        ui.label('TAGGED FILES:').classes('text-gray-500 text-xs font-bold')
+                        ui.radio(['Copy', 'Move'], value=state.batch_mode) \
+                            .bind_value(state, 'batch_mode') \
+                            .props('inline dark color=green')
+                    
+                    # Untagged files mode
+                    with ui.column():
+                        ui.label('UNTAGGED FILES:').classes('text-gray-500 text-xs font-bold')
+                        ui.radio(['Keep', 'Move to Unused', 'Delete'], value=state.cleanup_mode) \
+                            .bind_value(state, 'cleanup_mode') \
+                            .props('inline dark color=green')
+                    
+                    # Action buttons
+                    with ui.row().classes('items-center gap-6'):
+                        ui.button('APPLY PAGE', on_click=action_apply_page) \
+                            .props('outline color=white lg')
+                        
+                        with ui.column().classes('items-center'):
+                            ui.button('APPLY GLOBAL', on_click=action_apply_global) \
+                                .props('lg color=red-900')
+                            ui.label('(Process All)').classes('text-xs text-gray-500')
+            
+            # Pairing Mode Panel
+            with ui.tab_panel(pairing_tab).classes('p-6'):
+                # Adjacent folder input
+                with ui.row().classes('w-full items-center gap-4 mb-4'):
+                    ui.label("Adjacent Folder:").classes('text-gray-400')
+                    ui.input(placeholder='/path/to/adjacent/folder') \
+                        .bind_value(state, 'pair_adjacent_folder') \
+                        .classes('flex-grow').props('dark dense outlined')
+                    ui.button('LOAD ADJACENT', on_click=lambda: (load_adjacent_folder(), pair_navigate(0))) \
+                        .props('color=orange')
+                
+                # Pairing view container
+                state.pairing_container = ui.column().classes('w-full')
+                
+                # Footer for pairing mode
+                ui.separator().classes('my-10 bg-gray-800')
+                
+                with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
+                    with ui.column():
+                        ui.label('PAIRED TAGGING:').classes('text-gray-500 text-xs font-bold')
+                        ui.label('Both images get the same category and index').classes('text-gray-600 text-xs')
+                    
+                    with ui.row().classes('items-center gap-6'):
+                        ui.button('APPLY GLOBAL', on_click=action_apply_global) \
+                            .props('lg color=red-900')
+        
+        # Tab change handler to switch modes
+        def on_tab_change(e):
+            if e.value == gallery_tab:
+                state.current_mode = "gallery"
+            else:
+                state.current_mode = "pairing"
+                pair_navigate(0)  # Initialize pairing view
+        
+        tabs.on('update:model-value', on_tab_change)
 
 # ==========================================
 # INITIALIZATION
