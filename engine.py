@@ -259,20 +259,42 @@ class SorterEngine:
 
     # --- 4. IMAGE & ID OPERATIONS ---
     @staticmethod
-    def get_images(path, recursive=False):
-        """Image scanner with optional recursive subfolder support."""
+    def get_images(path, recursive=False, exclude_paths=None):
+        """Image scanner with optional recursive subfolder support.
+        
+        Args:
+            path: Directory to scan
+            recursive: Whether to scan subdirectories
+            exclude_paths: List of paths to exclude from scanning
+        """
         exts = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
         if not path or not os.path.exists(path): return []
+        
+        exclude_paths = exclude_paths or []
+        # Normalize exclude paths
+        exclude_normalized = [os.path.normpath(os.path.abspath(p)) for p in exclude_paths]
+        
         image_list = []
         if recursive:
-            for root, _, files in os.walk(path):
+            for root, dirs, files in os.walk(path):
                 # Skip the trash folder from scanning
                 if "_DELETED" in root: continue
+                
+                # Skip excluded paths
+                root_normalized = os.path.normpath(os.path.abspath(root))
+                if any(root_normalized.startswith(exc) or exc.startswith(root_normalized) for exc in exclude_normalized):
+                    # Remove excluded dirs from dirs to prevent descending into them
+                    dirs[:] = [d for d in dirs if os.path.normpath(os.path.abspath(os.path.join(root, d))) not in exclude_normalized]
+                    if root_normalized in exclude_normalized:
+                        continue
+                
                 for f in files:
-                    if f.lower().endswith(exts): image_list.append(os.path.join(root, f))
+                    if f.lower().endswith(exts): 
+                        image_list.append(os.path.join(root, f))
         else:
             for f in os.listdir(path):
-                if f.lower().endswith(exts): image_list.append(os.path.join(path, f))
+                if f.lower().endswith(exts): 
+                    image_list.append(os.path.join(path, f))
         return sorted(image_list)
 
     @staticmethod
