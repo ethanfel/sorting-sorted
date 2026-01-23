@@ -77,6 +77,14 @@ class AppState:
         self.input_base = p_data.get("tab5_source", "/storage")
         self.output_base = p_data.get("tab5_out", "/storage")
         self.folder_name = ""
+        
+        # Load pairing mode settings
+        self.pair_adjacent_folder = p_data.get("pair_adjacent_folder", "")
+        self.pair_main_category = p_data.get("pair_main_category", "control")
+        self.pair_adj_category = p_data.get("pair_adj_category", "control")
+        self.pair_main_output = p_data.get("pair_main_output", "/storage")
+        self.pair_adj_output = p_data.get("pair_adj_output", "/storage")
+        self.pair_time_window = p_data.get("pair_time_window", 60)
 
     @property
     def source_dir(self):
@@ -96,9 +104,30 @@ class AppState:
         """Save current paths to active profile."""
         if self.profile_name not in self.profiles:
             self.profiles[self.profile_name] = {}
+        
+        # Save gallery mode settings
         self.profiles[self.profile_name]["tab5_source"] = self.input_base
         self.profiles[self.profile_name]["tab5_out"] = self.output_base
-        SorterEngine.save_tab_paths(self.profile_name, t5_s=self.input_base, t5_o=self.output_base)
+        
+        # Save pairing mode settings
+        self.profiles[self.profile_name]["pair_adjacent_folder"] = self.pair_adjacent_folder
+        self.profiles[self.profile_name]["pair_main_category"] = self.pair_main_category
+        self.profiles[self.profile_name]["pair_adj_category"] = self.pair_adj_category
+        self.profiles[self.profile_name]["pair_main_output"] = self.pair_main_output
+        self.profiles[self.profile_name]["pair_adj_output"] = self.pair_adj_output
+        self.profiles[self.profile_name]["pair_time_window"] = self.pair_time_window
+        
+        SorterEngine.save_tab_paths(
+            self.profile_name, 
+            t5_s=self.input_base, 
+            t5_o=self.output_base,
+            pair_adjacent_folder=self.pair_adjacent_folder,
+            pair_main_category=self.pair_main_category,
+            pair_adj_category=self.pair_adj_category,
+            pair_main_output=self.pair_main_output,
+            pair_adj_output=self.pair_adj_output,
+            pair_time_window=self.pair_time_window
+        )
         ui.notify(f"Profile '{self.profile_name}' saved!", type='positive')
 
     def get_categories(self) -> List[str]:
@@ -343,10 +372,10 @@ def render_pairing_view():
                     ui.label(f"⏱ {datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}") \
                         .classes('text-xs text-gray-500 mb-2')
                 
-                # Main image - LARGE
+                # Main image - use h-96 and fit=contain like gallery mode
                 ui.image(f"/thumbnail?path={current_img}&size=800&q={state.preview_quality}") \
-                    .classes('w-full bg-black rounded') \
-                    .style('height: 500px; object-fit: contain;')
+                    .classes('w-full h-96 bg-black rounded') \
+                    .props('fit=contain')
                 
                 # Tag status
                 if is_main_staged:
@@ -388,10 +417,10 @@ def render_pairing_view():
                         ui.label(f"⏱ {datetime.fromtimestamp(match_ts).strftime('%Y-%m-%d %H:%M:%S')} ({sign}{diff:.1f}s)") \
                             .classes('text-xs text-gray-500 mb-2')
                     
-                    # Match image - LARGE same as main
+                    # Match image - same size as main
                     ui.image(f"/thumbnail?path={match_img}&size=800&q={state.preview_quality}") \
-                        .classes('w-full bg-black rounded') \
-                        .style('height: 500px; object-fit: contain;')
+                        .classes('w-full h-96 bg-black rounded') \
+                        .props('fit=contain')
                     
                     # Tag status
                     if is_match_staged:
