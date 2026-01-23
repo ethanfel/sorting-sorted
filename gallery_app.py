@@ -917,8 +917,8 @@ document.addEventListener('keydown', function(e) {
 </script>
 ''')
 
-# Use NiceGUI keyboard with active_element_only=False for better capture
-ui.keyboard(on_key=handle_keyboard, ignore=[], active_element_only=False)
+# Use NiceGUI keyboard
+ui.keyboard(on_key=handle_keyboard, ignore=[])
 ui.dark_mode().enable()
 load_images()
 
