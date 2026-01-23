@@ -63,6 +63,13 @@ class AppState:
         self.pair_matches: List[str] = []  # Current matches for selected image
         self.pair_selected_match = None  # Currently selected match
         self.pairing_container = None  # UI container for pairing mode
+        
+        # Separate settings for main and adjacent sides
+        self.pair_main_category = "control"  # Category for main folder images
+        self.pair_adj_category = "control"   # Category for adjacent folder images
+        self.pair_main_output = "/storage"   # Output folder for main images
+        self.pair_adj_output = "/storage"    # Output folder for adjacent images
+        self.pair_index = 1  # Shared index for both sides
 
     def load_active_profile(self):
         """Load paths from active profile."""
@@ -240,22 +247,29 @@ def pair_navigate(direction: int):
     render_pairing_view()
 
 def pair_tag_both():
-    """Tag both the current image and selected match with same index."""
+    """Tag both the current image and selected match with same index but different categories."""
     if not state.all_images:
         return
     
     current_img = state.all_images[state.pair_current_idx]
+    idx = state.pair_index
     
-    # Tag the main image
-    action_tag(current_img)
-    used_idx = state.next_index - 1  # action_tag increments, so get the one just used
+    # Tag the main image with main category
+    ext_main = os.path.splitext(current_img)[1]
+    name_main = f"{state.pair_main_category}_{idx:03d}{ext_main}"
+    SorterEngine.stage_image(current_img, state.pair_main_category, name_main)
     
-    # Tag the match with same index if selected
+    # Tag the match with adjacent category if selected
     if state.pair_selected_match:
-        ext = os.path.splitext(state.pair_selected_match)[1]
-        name = f"{state.active_cat}_{used_idx:03d}{ext}"
-        SorterEngine.stage_image(state.pair_selected_match, state.active_cat, name)
-        ui.notify(f"Tagged pair as {state.active_cat} #{used_idx}", type='positive')
+        ext_adj = os.path.splitext(state.pair_selected_match)[1]
+        name_adj = f"{state.pair_adj_category}_{idx:03d}{ext_adj}"
+        SorterEngine.stage_image(state.pair_selected_match, state.pair_adj_category, name_adj)
+        ui.notify(f"Tagged pair #{idx}: {state.pair_main_category} + {state.pair_adj_category}", type='positive')
+    else:
+        ui.notify(f"Tagged main #{idx}: {state.pair_main_category}", type='positive')
+    
+    # Increment shared index
+    state.pair_index += 1
     
     refresh_staged_info()
     render_pairing_view()
@@ -267,27 +281,38 @@ def render_pairing_view():
     
     state.pairing_container.clear()
     
+    categories = state.get_categories()
+    
     with state.pairing_container:
         if not state.all_images:
-            ui.label("No images loaded. Set paths and click LOAD.").classes('text-gray-400')
+            ui.label("No images loaded. Set paths and click LOAD in the header.").classes('text-gray-400 text-xl text-center w-full py-20')
             return
         
         current_img = state.all_images[state.pair_current_idx]
         is_main_staged = current_img in state.staged_data
+        ts = get_file_timestamp(current_img)
         
-        # Navigation bar
-        with ui.row().classes('w-full justify-center items-center gap-4 mb-4'):
+        # Top control bar
+        with ui.row().classes('w-full justify-center items-center gap-4 mb-4 p-4 bg-gray-800 rounded'):
+            # Navigation
             ui.button(icon='arrow_back', on_click=lambda: pair_navigate(-1)) \
-                .props('flat color=white').tooltip('Previous (←)')
-            ui.label(f"{state.pair_current_idx + 1} / {len(state.all_images)}").classes('text-xl')
+                .props('flat color=white size=lg').tooltip('Previous (←)')
+            ui.label(f"{state.pair_current_idx + 1} / {len(state.all_images)}").classes('text-2xl font-bold')
             ui.button(icon='arrow_forward', on_click=lambda: pair_navigate(1)) \
-                .props('flat color=white').tooltip('Next (→)')
+                .props('flat color=white size=lg').tooltip('Next (→)')
             
-            ui.label("|").classes('text-gray-600 mx-2')
+            ui.label("|").classes('text-gray-600 mx-4')
+            
+            # Shared index
+            ui.number(label="Index #", value=state.pair_index, min=1, precision=0,
+                     on_change=lambda e: setattr(state, 'pair_index', int(e.value))) \
+                .props('dense dark outlined').classes('w-24')
             
             # Tag both button
             ui.button("TAG PAIR", icon='label', on_click=pair_tag_both) \
-                .props('color=green').classes('ml-4')
+                .props('color=green size=lg').classes('ml-4')
+            
+            ui.label("|").classes('text-gray-600 mx-4')
             
             # Time window setting
             ui.number(label="±sec", value=state.pair_time_window, min=1, max=300,
@@ -295,68 +320,99 @@ def render_pairing_view():
                                          pair_navigate(0))) \
                 .props('dense dark outlined').classes('w-24')
         
-        # Split view
+        # Split view - two equal columns
         with ui.row().classes('w-full gap-4'):
-            # Left side - Main image
+            # ===== LEFT SIDE - Main image =====
             with ui.card().classes('flex-1 p-4 bg-gray-800'):
-                ui.label("📁 Main Folder").classes('text-lg font-bold text-blue-400 mb-2')
-                ui.label(os.path.basename(current_img)).classes('text-xs text-gray-400 truncate mb-2')
+                # Header with category selector
+                with ui.row().classes('w-full justify-between items-center mb-2'):
+                    ui.label("📁 Main Folder").classes('text-lg font-bold text-blue-400')
+                    ui.select(categories, value=state.pair_main_category,
+                             on_change=lambda e: setattr(state, 'pair_main_category', e.value)) \
+                        .props('dark dense outlined').classes('w-32')
                 
-                # Timestamp
-                ts = get_file_timestamp(current_img)
+                # Output folder
+                ui.input(label='Output', value=state.pair_main_output,
+                        on_change=lambda e: setattr(state, 'pair_main_output', e.value)) \
+                    .props('dark dense outlined').classes('w-full mb-2')
+                
+                # Filename and timestamp
+                ui.label(os.path.basename(current_img)).classes('text-sm text-gray-400 truncate')
                 if ts:
                     from datetime import datetime
-                    ui.label(f"⏱ {datetime.fromtimestamp(ts).strftime('%H:%M:%S')}") \
+                    ui.label(f"⏱ {datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')}") \
                         .classes('text-xs text-gray-500 mb-2')
                 
+                # Main image - LARGE
                 ui.image(f"/thumbnail?path={current_img}&size=800&q={state.preview_quality}") \
-                    .classes('w-full h-96 bg-black rounded') \
-                    .props('fit=contain')
+                    .classes('w-full bg-black rounded') \
+                    .style('height: 500px; object-fit: contain;')
                 
+                # Tag status
                 if is_main_staged:
                     info = state.staged_data[current_img]
-                    ui.label(f"🏷️ {info['cat']} - {info['name']}").classes('text-green-400 mt-2')
+                    ui.label(f"🏷️ {info['cat']} - {info['name']}").classes('text-green-400 mt-2 text-center')
                 else:
-                    ui.label("Not tagged").classes('text-gray-500 mt-2')
+                    ui.label("Not tagged").classes('text-gray-500 mt-2 text-center')
             
-            # Right side - Matches from adjacent folder
+            # ===== RIGHT SIDE - Adjacent folder match =====
             with ui.card().classes('flex-1 p-4 bg-gray-800'):
-                ui.label("📂 Adjacent Folder").classes('text-lg font-bold text-orange-400 mb-2')
+                # Header with category selector
+                with ui.row().classes('w-full justify-between items-center mb-2'):
+                    ui.label("📂 Adjacent Folder").classes('text-lg font-bold text-orange-400')
+                    ui.select(categories, value=state.pair_adj_category,
+                             on_change=lambda e: setattr(state, 'pair_adj_category', e.value)) \
+                        .props('dark dense outlined').classes('w-32')
+                
+                # Output folder
+                ui.input(label='Output', value=state.pair_adj_output,
+                        on_change=lambda e: setattr(state, 'pair_adj_output', e.value)) \
+                    .props('dark dense outlined').classes('w-full mb-2')
                 
                 if not state.pair_adjacent_folder:
-                    ui.label("Set adjacent folder path above").classes('text-gray-500')
+                    ui.label("Set adjacent folder path and click LOAD ADJACENT").classes('text-gray-500 text-center py-20')
                 elif not state.pair_matches:
-                    ui.label("No matches within time window").classes('text-gray-500')
-                else:
-                    ui.label(f"{len(state.pair_matches)} matches found").classes('text-xs text-gray-400 mb-2')
+                    ui.label("No matches within time window").classes('text-gray-500 text-center py-20')
+                elif state.pair_selected_match:
+                    # Show selected match - LARGE (same as main)
+                    match_img = state.pair_selected_match
+                    is_match_staged = match_img in state.staged_data
+                    match_ts = get_file_timestamp(match_img)
                     
-                    # Show matches as selectable thumbnails
-                    with ui.scroll_area().classes('w-full h-96'):
-                        for match_img in state.pair_matches[:10]:  # Limit to 10 matches
-                            is_selected = match_img == state.pair_selected_match
-                            is_match_staged = match_img in state.staged_data
-                            
-                            with ui.card().classes(
-                                f'p-2 mb-2 cursor-pointer {"border-2 border-green-500" if is_selected else "border border-gray-700"}'
-                            ).on('click', lambda m=match_img: select_match(m)):
-                                ui.label(os.path.basename(match_img)).classes('text-xs text-gray-400 truncate')
-                                
-                                # Timestamp and time diff
-                                match_ts = get_file_timestamp(match_img)
-                                if match_ts and ts:
-                                    from datetime import datetime
-                                    diff = match_ts - ts
-                                    sign = "+" if diff >= 0 else ""
-                                    ui.label(f"⏱ {datetime.fromtimestamp(match_ts).strftime('%H:%M:%S')} ({sign}{diff:.1f}s)") \
-                                        .classes('text-xs text-gray-500')
-                                
-                                ui.image(f"/thumbnail?path={match_img}&size=400&q=50") \
-                                    .classes('w-full h-32 bg-black rounded') \
-                                    .props('fit=contain')
-                                
-                                if is_match_staged:
-                                    info = state.staged_data[match_img]
-                                    ui.label(f"🏷️ {info['cat']}").classes('text-green-400 text-xs')
+                    # Filename and timestamp
+                    ui.label(os.path.basename(match_img)).classes('text-sm text-gray-400 truncate')
+                    if match_ts and ts:
+                        from datetime import datetime
+                        diff = match_ts - ts
+                        sign = "+" if diff >= 0 else ""
+                        ui.label(f"⏱ {datetime.fromtimestamp(match_ts).strftime('%Y-%m-%d %H:%M:%S')} ({sign}{diff:.1f}s)") \
+                            .classes('text-xs text-gray-500 mb-2')
+                    
+                    # Match image - LARGE same as main
+                    ui.image(f"/thumbnail?path={match_img}&size=800&q={state.preview_quality}") \
+                        .classes('w-full bg-black rounded') \
+                        .style('height: 500px; object-fit: contain;')
+                    
+                    # Tag status
+                    if is_match_staged:
+                        info = state.staged_data[match_img]
+                        ui.label(f"🏷️ {info['cat']} - {info['name']}").classes('text-green-400 mt-2 text-center')
+                    else:
+                        ui.label("Not tagged").classes('text-gray-500 mt-2 text-center')
+                    
+                    # Match selector below
+                    if len(state.pair_matches) > 1:
+                        ui.separator().classes('my-2')
+                        ui.label(f"Other matches ({len(state.pair_matches)} total):").classes('text-xs text-gray-400')
+                        with ui.row().classes('w-full gap-2 flex-wrap'):
+                            for i, m in enumerate(state.pair_matches[:10]):
+                                is_sel = m == state.pair_selected_match
+                                ui.button(
+                                    f"#{i+1}",
+                                    on_click=lambda match=m: select_match(match)
+                                ).props(f'{"" if is_sel else "flat"} color={"green" if is_sel else "grey"} dense size=sm')
+                else:
+                    ui.label("Select a match").classes('text-gray-500 text-center py-20')
 
 def select_match(match_path: str):
     """Select a match image."""
@@ -1179,11 +1235,13 @@ def build_main_content():
                 with ui.row().classes('w-full justify-around p-6 bg-gray-950 rounded-xl border border-gray-800'):
                     with ui.column():
                         ui.label('PAIRED TAGGING:').classes('text-gray-500 text-xs font-bold')
-                        ui.label('Both images get the same category and index').classes('text-gray-600 text-xs')
+                        ui.label('Each side has its own category and output folder').classes('text-gray-600 text-xs')
+                        ui.label('Both images share the same index number').classes('text-gray-600 text-xs')
                     
                     with ui.row().classes('items-center gap-6'):
                         ui.button('APPLY GLOBAL', on_click=action_apply_global) \
                             .props('lg color=red-900')
+                        ui.label('Files go to their respective output folders').classes('text-xs text-gray-500')
         
         # Tab change handler to switch modes
         def on_tab_change(e):
