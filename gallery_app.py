@@ -31,6 +31,7 @@ class AppState:
         self.active_cat = "control"
         self.next_index = 1
         self.hovered_image = None  # Track currently hovered image for keyboard shortcuts
+        self.category_hotkeys: Dict[str, str] = {}  # Maps hotkey -> category name
         
         # Undo Stack
         self.undo_stack: List[Dict] = []  # Stores last actions for undo
@@ -390,6 +391,66 @@ def open_zoom_dialog(path: str, title: Optional[str] = None, show_untag: bool = 
         ui.image(f"/full_res?path={path}").classes('w-full h-auto object-contain max-h-[85vh]')
     dialog.open()
 
+def open_hotkey_dialog(category: str):
+    """Open dialog to set/change hotkey for a category."""
+    # Find current hotkey if any
+    current_hotkey = None
+    for hk, cat in state.category_hotkeys.items():
+        if cat == category:
+            current_hotkey = hk
+            break
+    
+    with ui.dialog() as dialog, ui.card().classes('p-4 bg-gray-800'):
+        ui.label(f'Set Hotkey for "{category}"').classes('font-bold text-white mb-2')
+        
+        ui.label('Press a letter key (A-Z) to assign as hotkey').classes('text-gray-400 text-sm mb-4')
+        
+        if current_hotkey:
+            ui.label(f'Current: {current_hotkey.upper()}').classes('text-blue-400 mb-2')
+        
+        hotkey_input = ui.input(
+            placeholder='Type a letter...',
+            value=current_hotkey or ''
+        ).props('dark outlined dense autofocus').classes('w-full')
+        
+        def save_hotkey():
+            key = hotkey_input.value.lower().strip()
+            if key and len(key) == 1 and key.isalpha():
+                # Remove old hotkey for this category
+                to_remove = [hk for hk, c in state.category_hotkeys.items() if c == category]
+                for hk in to_remove:
+                    del state.category_hotkeys[hk]
+                
+                # Remove if another category had this hotkey
+                if key in state.category_hotkeys:
+                    del state.category_hotkeys[key]
+                
+                # Set new hotkey
+                state.category_hotkeys[key] = category
+                ui.notify(f'Hotkey "{key.upper()}" set for {category}', type='positive')
+                dialog.close()
+                render_sidebar()
+            elif key == '':
+                # Clear hotkey
+                to_remove = [hk for hk, c in state.category_hotkeys.items() if c == category]
+                for hk in to_remove:
+                    del state.category_hotkeys[hk]
+                ui.notify(f'Hotkey cleared for {category}', type='info')
+                dialog.close()
+                render_sidebar()
+            else:
+                ui.notify('Please enter a single letter (A-Z)', type='warning')
+        
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+            ui.button('Clear', on_click=lambda: (
+                hotkey_input.set_value(''),
+                save_hotkey()
+            )).props('flat color=grey')
+            ui.button('Cancel', on_click=dialog.close).props('flat')
+            ui.button('Save', on_click=save_hotkey).props('color=green')
+    
+    dialog.open()
+
 def render_sidebar():
     """Render category management sidebar."""
     state.sidebar_container.clear()
@@ -425,20 +486,46 @@ def render_sidebar():
                   .props(f'color={color} size=sm flat') \
                   .classes('w-full border border-gray-800')
         
-        # Category selector
+        # Category Manager (expanded)
+        ui.label("📂 Categories").classes('text-sm font-bold text-gray-400 mt-2')
+        
         categories = state.get_categories()
         
-        def on_category_change(e):
-            state.active_cat = e.value
-            refresh_staged_info()
-            render_sidebar()
-        
-        ui.select(
-            categories,
-            value=state.active_cat,
-            label="Active Category",
-            on_change=on_category_change
-        ).classes('w-full').props('dark outlined')
+        # Category list with hotkey buttons
+        for cat in categories:
+            is_active = cat == state.active_cat
+            hotkey = None
+            # Find if this category has a hotkey
+            for hk, cat_name in state.category_hotkeys.items():
+                if cat_name == cat:
+                    hotkey = hk
+                    break
+            
+            with ui.row().classes('w-full items-center no-wrap gap-1'):
+                # Category button
+                ui.button(
+                    cat,
+                    on_click=lambda c=cat: (
+                        setattr(state, 'active_cat', c),
+                        refresh_staged_info(),
+                        render_sidebar()
+                    )
+                ).props(f'{"" if is_active else "flat"} color={"green" if is_active else "grey"} dense') \
+                 .classes('flex-grow text-left')
+                
+                # Hotkey badge/button
+                def make_hotkey_handler(category):
+                    def handler():
+                        open_hotkey_dialog(category)
+                    return handler
+                
+                if hotkey:
+                    ui.button(hotkey.upper(), on_click=make_hotkey_handler(cat)) \
+                        .props('flat dense color=blue size=sm').classes('w-8')
+                else:
+                    ui.button('+', on_click=make_hotkey_handler(cat)) \
+                        .props('flat dense color=grey size=sm').classes('w-8') \
+                        .tooltip('Set hotkey')
         
         # Add new category
         with ui.row().classes('w-full items-center no-wrap mt-2'):
@@ -457,6 +544,10 @@ def render_sidebar():
         # Delete category
         with ui.expansion('Danger Zone', icon='warning').classes('w-full text-red-400 mt-2'):
             def delete_category():
+                # Also remove any hotkey for this category
+                to_remove = [hk for hk, c in state.category_hotkeys.items() if c == state.active_cat]
+                for hk in to_remove:
+                    del state.category_hotkeys[hk]
                 SorterEngine.delete_category(state.active_cat, state.profile_name)
                 refresh_staged_info()
                 render_sidebar()
@@ -483,18 +574,19 @@ def render_sidebar():
             shortcuts = [
                 ("1-9", "Tag hovered image with index"),
                 ("0", "Tag with next index"),
-                ("U", "Untag hovered image"),
-                ("F", "Cycle filter (all/untagged/tagged)"),
+                ("U", "Untag hovered image*"),
+                ("F", "Cycle filter*"),
                 ("Ctrl+S", "Save tags"),
                 ("Ctrl+Z", "Undo last action"),
-                ("Ctrl+1-5", "Switch category"),
+                ("A-Z", "Switch category (set above)"),
                 ("← →", "Previous/Next page"),
-                ("Double-click", "Tag/Untag image"),
+                ("Dbl-click", "Tag/Untag image"),
             ]
             for key, desc in shortcuts:
                 with ui.row().classes('w-full justify-between text-xs'):
                     ui.label(key).classes('text-green-400 font-mono')
                     ui.label(desc).classes('text-gray-500')
+            ui.label("*unless assigned to category").classes('text-gray-600 text-xs mt-1')
 
 def render_gallery():
     """Render image gallery grid."""
@@ -647,55 +739,95 @@ def refresh_ui():
     render_gallery()
 
 def handle_keyboard(e):
-    """Handle keyboard navigation and shortcuts."""
+    """Handle keyboard navigation and shortcuts (fallback)."""
     if not e.action.keydown:
         return
     
-    key = e.key
+    key = e.key.name if hasattr(e.key, 'name') else str(e.key)
+    ctrl = e.modifiers.ctrl if hasattr(e.modifiers, 'ctrl') else False
+    key_lower = key.lower() if isinstance(key, str) else key
     
-    # Navigation
-    if key.arrow_left and state.page > 0:
+    # Navigation - arrow keys
+    if key == 'ArrowLeft' and state.page > 0:
         set_page(state.page - 1)
-    elif key.arrow_right and state.page < state.total_pages - 1:
+    elif key == 'ArrowRight' and state.page < state.total_pages - 1:
         set_page(state.page + 1)
     
     # Undo (Ctrl+Z)
-    elif key == 'z' and e.modifiers.ctrl:
+    elif key_lower == 'z' and ctrl:
         action_undo()
     
     # Save (Ctrl+S)
-    elif key == 's' and e.modifiers.ctrl:
+    elif key_lower == 's' and ctrl:
         action_save_tags()
     
-    # Quick category switch (Ctrl+1 through Ctrl+5)
-    elif e.modifiers.ctrl and key in '12345':
-        cats = state.get_categories()
-        cat_idx = int(key) - 1
-        if cat_idx < len(cats):
-            state.active_cat = cats[cat_idx]
-            refresh_staged_info()
-            refresh_ui()
-            ui.notify(f"Category: {state.active_cat}", type='info')
+    # Custom category hotkeys (single letters A-Z, not ctrl)
+    elif not ctrl and len(key) == 1 and key_lower.isalpha() and key_lower in state.category_hotkeys:
+        state.active_cat = state.category_hotkeys[key_lower]
+        refresh_staged_info()
+        refresh_ui()
+        ui.notify(f"Category: {state.active_cat}", type='info')
     
     # Number keys 1-9 to tag hovered image
-    elif key in '123456789' and not e.modifiers.ctrl:
+    elif key in '123456789' and not ctrl:
         if state.hovered_image and state.hovered_image not in state.staged_data:
             action_tag(state.hovered_image, int(key))
     
     # 0 key to tag with next_index
-    elif key == '0' and state.hovered_image and state.hovered_image not in state.staged_data:
+    elif key == '0' and not ctrl and state.hovered_image and state.hovered_image not in state.staged_data:
         action_tag(state.hovered_image)
     
-    # U to untag hovered image
-    elif key == 'u' and state.hovered_image and state.hovered_image in state.staged_data:
-        action_untag(state.hovered_image)
+    # U to untag hovered image (only if not assigned as category hotkey)
+    elif key_lower == 'u' and not ctrl and 'u' not in state.category_hotkeys:
+        if state.hovered_image and state.hovered_image in state.staged_data:
+            action_untag(state.hovered_image)
     
-    # F to cycle filter modes
-    elif key == 'f' and not e.modifiers.ctrl:
+    # F to cycle filter modes (only if not assigned as category hotkey)
+    elif key_lower == 'f' and not ctrl and 'f' not in state.category_hotkeys:
         modes = ["all", "untagged", "tagged"]
         current_idx = modes.index(state.filter_mode)
         state.filter_mode = modes[(current_idx + 1) % 3]
         state.page = 0  # Reset to first page when changing filter
+        refresh_ui()
+        ui.notify(f"Filter: {state.filter_mode}", type='info')
+
+def process_key(key: str, ctrl: bool):
+    """Process keyboard input from JS event."""
+    # Navigation
+    if key == 'arrowleft' and state.page > 0:
+        set_page(state.page - 1)
+    elif key == 'arrowright' and state.page < state.total_pages - 1:
+        set_page(state.page + 1)
+    # Undo
+    elif key == 'z' and ctrl:
+        action_undo()
+    # Save
+    elif key == 's' and ctrl:
+        action_save_tags()
+    # Custom category hotkeys
+    elif not ctrl and len(key) == 1 and key.isalpha() and key in state.category_hotkeys:
+        state.active_cat = state.category_hotkeys[key]
+        refresh_staged_info()
+        refresh_ui()
+        ui.notify(f"Category: {state.active_cat}", type='info')
+    # Tag with number
+    elif key in '123456789' and not ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image, int(key))
+    # Tag with next index
+    elif key == '0' and not ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image)
+    # Untag (only if 'u' not assigned to category)
+    elif key == 'u' and not ctrl and 'u' not in state.category_hotkeys:
+        if state.hovered_image and state.hovered_image in state.staged_data:
+            action_untag(state.hovered_image)
+    # Filter (only if 'f' not assigned to category)
+    elif key == 'f' and not ctrl and 'f' not in state.category_hotkeys:
+        modes = ["all", "untagged", "tagged"]
+        current_idx = modes.index(state.filter_mode)
+        state.filter_mode = modes[(current_idx + 1) % 3]
+        state.page = 0
         refresh_ui()
         ui.notify(f"Filter: {state.filter_mode}", type='info')
 
@@ -717,8 +849,17 @@ def build_header():
                 
                 state.profile_name = e.value
                 state.load_active_profile()
-                state.active_cat = "control"  # Reset to default category
-                SorterEngine.clear_staging_area()  # Clear staging for new profile
+                
+                # Reset to first available category for new profile
+                cats = state.get_categories()
+                state.active_cat = cats[0] if cats else "control"
+                
+                # Clear staging and hotkeys for new profile
+                SorterEngine.clear_staging_area()
+                state.category_hotkeys = {}  # Reset hotkeys when switching profile
+                state.all_images = []
+                state.staged_data = {}
+                
                 refresh_staged_info()
                 refresh_ui()
             
@@ -849,7 +990,26 @@ build_header()
 build_sidebar()
 build_main_content()
 
-ui.keyboard(on_key=handle_keyboard)
+# JavaScript keyboard handler for Firefox compatibility
+ui.add_body_html('''
+<script>
+document.addEventListener('keydown', function(e) {
+    // Skip if typing in input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    
+    const key = e.key.toLowerCase();
+    const ctrl = e.ctrlKey || e.metaKey;
+    
+    // Prevent browser defaults for our shortcuts
+    if (ctrl && (key === 's' || key === 'z')) {
+        e.preventDefault();
+    }
+});
+</script>
+''')
+
+# Use NiceGUI keyboard
+ui.keyboard(on_key=handle_keyboard, ignore=[])
 ui.dark_mode().enable()
 load_images()
 
