@@ -647,28 +647,29 @@ def refresh_ui():
     render_gallery()
 
 def handle_keyboard(e):
-    """Handle keyboard navigation and shortcuts."""
+    """Handle keyboard navigation and shortcuts (fallback)."""
     if not e.action.keydown:
         return
     
-    key = e.key
+    key = e.key.name if hasattr(e.key, 'name') else str(e.key)
+    ctrl = e.modifiers.ctrl if hasattr(e.modifiers, 'ctrl') else False
     
-    # Navigation
-    if key.arrow_left and state.page > 0:
+    # Navigation - arrow keys
+    if key == 'ArrowLeft' and state.page > 0:
         set_page(state.page - 1)
-    elif key.arrow_right and state.page < state.total_pages - 1:
+    elif key == 'ArrowRight' and state.page < state.total_pages - 1:
         set_page(state.page + 1)
     
     # Undo (Ctrl+Z)
-    elif key == 'z' and e.modifiers.ctrl:
+    elif key.lower() == 'z' and ctrl:
         action_undo()
     
     # Save (Ctrl+S)
-    elif key == 's' and e.modifiers.ctrl:
+    elif key.lower() == 's' and ctrl:
         action_save_tags()
     
     # Quick category switch (Ctrl+1 through Ctrl+5)
-    elif e.modifiers.ctrl and key in '12345':
+    elif ctrl and key in '12345':
         cats = state.get_categories()
         cat_idx = int(key) - 1
         if cat_idx < len(cats):
@@ -678,24 +679,67 @@ def handle_keyboard(e):
             ui.notify(f"Category: {state.active_cat}", type='info')
     
     # Number keys 1-9 to tag hovered image
-    elif key in '123456789' and not e.modifiers.ctrl:
+    elif key in '123456789' and not ctrl:
         if state.hovered_image and state.hovered_image not in state.staged_data:
             action_tag(state.hovered_image, int(key))
     
     # 0 key to tag with next_index
-    elif key == '0' and state.hovered_image and state.hovered_image not in state.staged_data:
+    elif key == '0' and not ctrl and state.hovered_image and state.hovered_image not in state.staged_data:
         action_tag(state.hovered_image)
     
     # U to untag hovered image
-    elif key == 'u' and state.hovered_image and state.hovered_image in state.staged_data:
+    elif key.lower() == 'u' and not ctrl and state.hovered_image and state.hovered_image in state.staged_data:
         action_untag(state.hovered_image)
     
     # F to cycle filter modes
-    elif key == 'f' and not e.modifiers.ctrl:
+    elif key.lower() == 'f' and not ctrl:
         modes = ["all", "untagged", "tagged"]
         current_idx = modes.index(state.filter_mode)
         state.filter_mode = modes[(current_idx + 1) % 3]
         state.page = 0  # Reset to first page when changing filter
+        refresh_ui()
+        ui.notify(f"Filter: {state.filter_mode}", type='info')
+
+def process_key(key: str, ctrl: bool):
+    """Process keyboard input from JS event."""
+    # Navigation
+    if key == 'arrowleft' and state.page > 0:
+        set_page(state.page - 1)
+    elif key == 'arrowright' and state.page < state.total_pages - 1:
+        set_page(state.page + 1)
+    # Undo
+    elif key == 'z' and ctrl:
+        action_undo()
+    # Save
+    elif key == 's' and ctrl:
+        action_save_tags()
+    # Category switch
+    elif ctrl and key in '12345':
+        cats = state.get_categories()
+        cat_idx = int(key) - 1
+        if cat_idx < len(cats):
+            state.active_cat = cats[cat_idx]
+            refresh_staged_info()
+            refresh_ui()
+            ui.notify(f"Category: {state.active_cat}", type='info')
+    # Tag with number
+    elif key in '123456789' and not ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image, int(key))
+    # Tag with next index
+    elif key == '0' and not ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image)
+    # Untag
+    elif key == 'u' and not ctrl:
+        if state.hovered_image and state.hovered_image in state.staged_data:
+            action_untag(state.hovered_image)
+    # Filter
+    elif key == 'f' and not ctrl:
+        modes = ["all", "untagged", "tagged"]
+        current_idx = modes.index(state.filter_mode)
+        state.filter_mode = modes[(current_idx + 1) % 3]
+        state.page = 0
         refresh_ui()
         ui.notify(f"Filter: {state.filter_mode}", type='info')
 
@@ -719,8 +763,14 @@ def build_header():
                 state.load_active_profile()
                 state.active_cat = "control"  # Reset to default category
                 SorterEngine.clear_staging_area()  # Clear staging for new profile
-                refresh_staged_info()
-                refresh_ui()
+                
+                # Auto-load if source path exists
+                if os.path.exists(state.source_dir):
+                    load_images()
+                else:
+                    state.all_images = []
+                    refresh_staged_info()
+                    refresh_ui()
             
             profile_select = ui.select(
                 list(state.profiles.keys()), 
@@ -849,7 +899,26 @@ build_header()
 build_sidebar()
 build_main_content()
 
-ui.keyboard(on_key=handle_keyboard)
+# JavaScript keyboard handler for Firefox compatibility
+ui.add_body_html('''
+<script>
+document.addEventListener('keydown', function(e) {
+    // Skip if typing in input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    
+    const key = e.key.toLowerCase();
+    const ctrl = e.ctrlKey || e.metaKey;
+    
+    // Prevent browser defaults for our shortcuts
+    if (ctrl && (key === 's' || key === 'z')) {
+        e.preventDefault();
+    }
+});
+</script>
+''')
+
+# Use NiceGUI keyboard with active_element_only=False for better capture
+ui.keyboard(on_key=handle_keyboard, ignore=[], active_element_only=False)
 ui.dark_mode().enable()
 load_images()
 
