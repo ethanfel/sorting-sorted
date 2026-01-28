@@ -1,6 +1,9 @@
 import os
 import shutil
 import sqlite3
+import base64
+import requests
+from datetime import datetime
 from contextlib import contextmanager
 from PIL import Image
 from io import BytesIO
@@ -68,6 +71,27 @@ class SorterEngine:
             for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
                 cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (cat,))
 
+        # --- CAPTION TABLES ---
+        # Per-category prompt templates
+        cursor.execute('''CREATE TABLE IF NOT EXISTS category_prompts
+            (profile TEXT, category TEXT, prompt_template TEXT,
+             PRIMARY KEY (profile, category))''')
+
+        # Stored captions
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_captions
+            (image_path TEXT PRIMARY KEY, caption TEXT, model TEXT,
+             generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        # Caption API settings per profile
+        cursor.execute('''CREATE TABLE IF NOT EXISTS caption_settings
+            (profile TEXT PRIMARY KEY,
+             api_endpoint TEXT DEFAULT 'http://localhost:8080/v1/chat/completions',
+             model_name TEXT DEFAULT 'local-model',
+             max_tokens INTEGER DEFAULT 300,
+             temperature REAL DEFAULT 0.7,
+             timeout_seconds INTEGER DEFAULT 60,
+             batch_size INTEGER DEFAULT 4)''')
+
         # --- PERFORMANCE INDEXES ---
         # Index for staging_area queries filtered by category
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_staging_category ON staging_area(target_category)")
@@ -75,6 +99,8 @@ class SorterEngine:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_folder_tags_profile ON folder_tags(profile, folder_path)")
         # Index for profile_categories lookups
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_profile_categories ON profile_categories(profile)")
+        # Index for caption lookups by image path
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_captions ON image_captions(image_path)")
 
         conn.commit()
         conn.close()
@@ -827,3 +853,370 @@ class SorterEngine:
         result = {row[0]: {"cat": row[1], "index": row[2]} for row in cursor.fetchall()}
         conn.close()
         return result
+
+    # --- 8. CAPTION SETTINGS & PROMPTS ---
+    @staticmethod
+    def get_caption_settings(profile):
+        """Get caption API settings for a profile."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        # Ensure table exists
+        cursor.execute('''CREATE TABLE IF NOT EXISTS caption_settings
+            (profile TEXT PRIMARY KEY,
+             api_endpoint TEXT DEFAULT 'http://localhost:8080/v1/chat/completions',
+             model_name TEXT DEFAULT 'local-model',
+             max_tokens INTEGER DEFAULT 300,
+             temperature REAL DEFAULT 0.7,
+             timeout_seconds INTEGER DEFAULT 60,
+             batch_size INTEGER DEFAULT 4)''')
+
+        cursor.execute("SELECT * FROM caption_settings WHERE profile = ?", (profile,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return {
+                "profile": row[0],
+                "api_endpoint": row[1],
+                "model_name": row[2],
+                "max_tokens": row[3],
+                "temperature": row[4],
+                "timeout_seconds": row[5],
+                "batch_size": row[6]
+            }
+        else:
+            # Return defaults
+            return {
+                "profile": profile,
+                "api_endpoint": "http://localhost:8080/v1/chat/completions",
+                "model_name": "local-model",
+                "max_tokens": 300,
+                "temperature": 0.7,
+                "timeout_seconds": 60,
+                "batch_size": 4
+            }
+
+    @staticmethod
+    def save_caption_settings(profile, api_endpoint=None, model_name=None, max_tokens=None,
+                              temperature=None, timeout_seconds=None, batch_size=None):
+        """Save caption API settings for a profile."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        # Ensure table exists
+        cursor.execute('''CREATE TABLE IF NOT EXISTS caption_settings
+            (profile TEXT PRIMARY KEY,
+             api_endpoint TEXT DEFAULT 'http://localhost:8080/v1/chat/completions',
+             model_name TEXT DEFAULT 'local-model',
+             max_tokens INTEGER DEFAULT 300,
+             temperature REAL DEFAULT 0.7,
+             timeout_seconds INTEGER DEFAULT 60,
+             batch_size INTEGER DEFAULT 4)''')
+
+        # Get existing values
+        cursor.execute("SELECT * FROM caption_settings WHERE profile = ?", (profile,))
+        row = cursor.fetchone()
+
+        if not row:
+            row = (profile, "http://localhost:8080/v1/chat/completions", "local-model", 300, 0.7, 60, 4)
+
+        new_values = (
+            profile,
+            api_endpoint if api_endpoint is not None else row[1],
+            model_name if model_name is not None else row[2],
+            max_tokens if max_tokens is not None else row[3],
+            temperature if temperature is not None else row[4],
+            timeout_seconds if timeout_seconds is not None else row[5],
+            batch_size if batch_size is not None else row[6]
+        )
+
+        cursor.execute("INSERT OR REPLACE INTO caption_settings VALUES (?, ?, ?, ?, ?, ?, ?)", new_values)
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_category_prompt(profile, category):
+        """Get prompt template for a category."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS category_prompts
+            (profile TEXT, category TEXT, prompt_template TEXT,
+             PRIMARY KEY (profile, category))''')
+
+        cursor.execute(
+            "SELECT prompt_template FROM category_prompts WHERE profile = ? AND category = ?",
+            (profile, category)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if row and row[0]:
+            return row[0]
+        else:
+            # Default prompt
+            return "Describe this image in detail for training purposes. Include subjects, actions, setting, colors, and composition."
+
+    @staticmethod
+    def save_category_prompt(profile, category, prompt):
+        """Save prompt template for a category."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS category_prompts
+            (profile TEXT, category TEXT, prompt_template TEXT,
+             PRIMARY KEY (profile, category))''')
+
+        cursor.execute(
+            "INSERT OR REPLACE INTO category_prompts VALUES (?, ?, ?)",
+            (profile, category, prompt)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_all_category_prompts(profile):
+        """Get all prompt templates for a profile."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS category_prompts
+            (profile TEXT, category TEXT, prompt_template TEXT,
+             PRIMARY KEY (profile, category))''')
+
+        cursor.execute(
+            "SELECT category, prompt_template FROM category_prompts WHERE profile = ?",
+            (profile,)
+        )
+        result = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+        return result
+
+    # --- 9. CAPTION STORAGE ---
+    @staticmethod
+    def save_caption(image_path, caption, model):
+        """Save a generated caption to the database."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_captions
+            (image_path TEXT PRIMARY KEY, caption TEXT, model TEXT,
+             generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        cursor.execute(
+            "INSERT OR REPLACE INTO image_captions VALUES (?, ?, ?, ?)",
+            (image_path, caption, model, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_caption(image_path):
+        """Get caption for an image."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_captions
+            (image_path TEXT PRIMARY KEY, caption TEXT, model TEXT,
+             generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        cursor.execute(
+            "SELECT caption, model, generated_at FROM image_captions WHERE image_path = ?",
+            (image_path,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return {"caption": row[0], "model": row[1], "generated_at": row[2]}
+        return None
+
+    @staticmethod
+    def get_captions_batch(image_paths):
+        """Get captions for multiple images."""
+        if not image_paths:
+            return {}
+
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_captions
+            (image_path TEXT PRIMARY KEY, caption TEXT, model TEXT,
+             generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        placeholders = ','.join('?' * len(image_paths))
+        cursor.execute(
+            f"SELECT image_path, caption, model, generated_at FROM image_captions WHERE image_path IN ({placeholders})",
+            image_paths
+        )
+        result = {row[0]: {"caption": row[1], "model": row[2], "generated_at": row[3]} for row in cursor.fetchall()}
+        conn.close()
+        return result
+
+    @staticmethod
+    def delete_caption(image_path):
+        """Delete caption for an image."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM image_captions WHERE image_path = ?", (image_path,))
+        conn.commit()
+        conn.close()
+
+    # --- 10. VLLM API CAPTIONING ---
+    @staticmethod
+    def caption_image_vllm(image_path, prompt, settings):
+        """
+        Generate caption for an image using VLLM API.
+
+        Args:
+            image_path: Path to the image file
+            prompt: Text prompt for captioning
+            settings: Dict with api_endpoint, model_name, max_tokens, temperature, timeout_seconds
+
+        Returns:
+            Tuple of (caption_text, error_message). If successful, error is None.
+        """
+        try:
+            # Read and encode image
+            with open(image_path, 'rb') as f:
+                img_bytes = f.read()
+            b64_image = base64.b64encode(img_bytes).decode('utf-8')
+
+            # Determine MIME type
+            ext = os.path.splitext(image_path)[1].lower()
+            mime_types = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.webp': 'image/webp',
+                '.bmp': 'image/bmp',
+                '.tiff': 'image/tiff'
+            }
+            mime_type = mime_types.get(ext, 'image/jpeg')
+
+            # Build request payload (OpenAI-compatible format)
+            payload = {
+                "model": settings.get('model_name', 'local-model'),
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_image}"}}
+                    ]
+                }],
+                "max_tokens": settings.get('max_tokens', 300),
+                "temperature": settings.get('temperature', 0.7)
+            }
+
+            # Make API request
+            response = requests.post(
+                settings.get('api_endpoint', 'http://localhost:8080/v1/chat/completions'),
+                json=payload,
+                timeout=settings.get('timeout_seconds', 60)
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            caption = result['choices'][0]['message']['content']
+            return caption.strip(), None
+
+        except requests.Timeout:
+            return None, f"API timeout after {settings.get('timeout_seconds', 60)}s"
+        except requests.RequestException as e:
+            return None, f"API error: {str(e)}"
+        except KeyError as e:
+            return None, f"Invalid API response: missing {str(e)}"
+        except Exception as e:
+            return None, f"Error: {str(e)}"
+
+    @staticmethod
+    def caption_batch_vllm(image_paths, get_prompt_fn, settings, progress_cb=None):
+        """
+        Caption multiple images using VLLM API.
+
+        Args:
+            image_paths: List of (image_path, category) tuples
+            get_prompt_fn: Function(category) -> prompt string
+            settings: Caption settings dict
+            progress_cb: Optional callback(current, total, status_msg) for progress updates
+
+        Returns:
+            Dict with results: {"success": count, "failed": count, "captions": {path: caption}}
+        """
+        results = {"success": 0, "failed": 0, "captions": {}, "errors": {}}
+        total = len(image_paths)
+
+        for i, (image_path, category) in enumerate(image_paths):
+            if progress_cb:
+                progress_cb(i, total, f"Captioning {os.path.basename(image_path)}...")
+
+            prompt = get_prompt_fn(category)
+            caption, error = SorterEngine.caption_image_vllm(image_path, prompt, settings)
+
+            if caption:
+                # Save to database
+                SorterEngine.save_caption(image_path, caption, settings.get('model_name', 'local-model'))
+                results["captions"][image_path] = caption
+                results["success"] += 1
+            else:
+                # Store error
+                error_caption = f"[ERROR] {error}"
+                SorterEngine.save_caption(image_path, error_caption, settings.get('model_name', 'local-model'))
+                results["errors"][image_path] = error
+                results["failed"] += 1
+
+        if progress_cb:
+            progress_cb(total, total, "Complete!")
+
+        return results
+
+    @staticmethod
+    def write_caption_sidecar(image_path, caption):
+        """
+        Write caption to a .txt sidecar file next to the image.
+
+        Args:
+            image_path: Path to the image file
+            caption: Caption text to write
+
+        Returns:
+            Path to sidecar file, or None on error
+        """
+        try:
+            # Create sidecar path (same name, .txt extension)
+            base_path = os.path.splitext(image_path)[0]
+            sidecar_path = f"{base_path}.txt"
+
+            with open(sidecar_path, 'w', encoding='utf-8') as f:
+                f.write(caption)
+
+            # Fix permissions
+            SorterEngine.fix_permissions(sidecar_path)
+
+            return sidecar_path
+        except Exception as e:
+            print(f"Warning: Could not write sidecar for {image_path}: {e}")
+            return None
+
+    @staticmethod
+    def read_caption_sidecar(image_path):
+        """
+        Read caption from a .txt sidecar file if it exists.
+
+        Args:
+            image_path: Path to the image file
+
+        Returns:
+            Caption text or None if no sidecar exists
+        """
+        try:
+            base_path = os.path.splitext(image_path)[0]
+            sidecar_path = f"{base_path}.txt"
+
+            if os.path.exists(sidecar_path):
+                with open(sidecar_path, 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+        except Exception:
+            pass
+        return None
