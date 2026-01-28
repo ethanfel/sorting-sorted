@@ -1,6 +1,5 @@
 import os
 import math
-import shutil
 import asyncio
 from typing import Optional, List, Dict, Set
 from nicegui import ui, app, run
@@ -33,7 +32,6 @@ class AppState:
         self.next_index = 1
         self.hovered_image = None  # Track currently hovered image for keyboard shortcuts
         self.category_hotkeys: Dict[str, str] = {}  # Maps hotkey -> category name
-        self.hotkey_by_category: Dict[str, str] = {}  # Reverse mapping: category -> hotkey
         
         # Undo Stack
         self.undo_stack: List[Dict] = []  # Stores last actions for undo
@@ -44,26 +42,17 @@ class AppState:
         # Batch Settings
         self.batch_mode = "Copy"
         self.cleanup_mode = "Keep"
-        self.applying_global = False  # Loading state for global apply
         
         # Data Caches
         self.all_images: List[str] = []
         self.staged_data: Dict = {}
         self.green_dots: Set[int] = set()
         self.index_map: Dict[int, str] = {}
-        self._cached_tagged: Set[str] = set()  # Cached set of tagged image paths
-        self._cached_untagged: Set[str] = set()  # Cached set of untagged image paths
-        self._committed_files: Dict[str, Set[str]] = {}  # category -> set of filenames on disk
         
         # UI Containers (populated later)
         self.sidebar_container = None
         self.grid_container = None
         self.pagination_container = None
-        # Sub-containers for partial refresh
-        self.number_grid_container = None
-        self.category_list_container = None
-        self.index_display_container = None
-        self.stats_container = None
 
     def load_active_profile(self):
         """Load paths from active profile."""
@@ -103,14 +92,13 @@ class AppState:
         return cats
 
     def get_filtered_images(self) -> List[str]:
-        """Get images based on current filter mode using cached sets."""
+        """Get images based on current filter mode."""
         if self.filter_mode == "all":
             return self.all_images
         elif self.filter_mode == "tagged":
-            # Use cached set for O(1) lookups
-            return [img for img in self.all_images if img in self._cached_tagged]
+            return [img for img in self.all_images if img in self.staged_data]
         elif self.filter_mode == "untagged":
-            return [img for img in self.all_images if img in self._cached_untagged]
+            return [img for img in self.all_images if img not in self.staged_data]
         return self.all_images
 
     @property
@@ -128,9 +116,9 @@ class AppState:
         return filtered[start : start + self.page_size]
     
     def get_stats(self) -> Dict:
-        """Get image statistics for display using cached counts."""
+        """Get image statistics for display."""
         total = len(self.all_images)
-        tagged = len(self._cached_tagged)
+        tagged = len([img for img in self.all_images if img in self.staged_data])
         return {"total": total, "tagged": tagged, "untagged": total - tagged}
 
 state = AppState()
@@ -141,31 +129,19 @@ state = AppState()
 
 @app.get('/thumbnail')
 async def get_thumbnail(path: str, size: int = 400, q: int = 50):
-    """Serve WebP thumbnail with dynamic quality and caching."""
+    """Serve WebP thumbnail with dynamic quality."""
     if not os.path.exists(path):
         return Response(status_code=404)
     img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, q, size)
-    if img_bytes:
-        return Response(
-            content=img_bytes,
-            media_type="image/webp",
-            headers={"Cache-Control": "max-age=86400, immutable"}
-        )
-    return Response(status_code=500)
+    return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
 
 @app.get('/full_res')
 async def get_full_res(path: str):
-    """Serve full resolution image with caching."""
+    """Serve full resolution image."""
     if not os.path.exists(path):
         return Response(status_code=404)
     img_bytes = await run.cpu_bound(SorterEngine.compress_for_web, path, 90, None)
-    if img_bytes:
-        return Response(
-            content=img_bytes,
-            media_type="image/webp",
-            headers={"Cache-Control": "max-age=86400, immutable"}
-        )
-    return Response(status_code=500)
+    return Response(content=img_bytes, media_type="image/webp") if img_bytes else Response(status_code=500)
 
 # ==========================================
 # CORE LOGIC
@@ -185,69 +161,50 @@ def load_images():
     
     # Clear staging area when loading a new folder
     SorterEngine.clear_staging_area()
-
-    # Clear committed files cache for all categories (new folder = new output dir)
-    state._committed_files.clear()
-
+    
     state.all_images = SorterEngine.get_images(state.source_dir, recursive=True)
-
+    
     # Restore previously saved tags for this folder and profile
     restored = SorterEngine.restore_folder_tags(state.source_dir, state.all_images, state.profile_name)
     if restored > 0:
         ui.notify(f"Restored {restored} tags from previous session", type='info')
-
+    
     # Reset page if out of bounds
     if state.page >= state.total_pages:
         state.page = 0
-
-    refresh_staged_info(full_scan=True)
+    
+    refresh_staged_info()
     refresh_ui()
 
-def refresh_staged_info(full_scan: bool = False):
-    """Update staged data and index maps.
-
-    Args:
-        full_scan: If True, rescan disk for committed files. Otherwise use cache.
-    """
+def refresh_staged_info():
+    """Update staged data and index maps."""
     state.staged_data = SorterEngine.get_staged_data()
-    staged_keys = set(state.staged_data.keys())
-
-    # Update cached tagged/untagged sets
-    state._cached_tagged = staged_keys
-    all_set = set(state.all_images)
-    state._cached_untagged = all_set - staged_keys
-
+    
     # Update green dots (pages with staged images)
     state.green_dots.clear()
+    staged_keys = set(state.staged_data.keys())
     for idx, img_path in enumerate(state.all_images):
         if img_path in staged_keys:
             state.green_dots.add(idx // state.page_size)
-
+    
     # Build index map for active category
     state.index_map.clear()
-
+    
     # Add staged images
     for orig_path, info in state.staged_data.items():
         if info['cat'] == state.active_cat:
             idx = _extract_index(info['name'])
             if idx is not None:
                 state.index_map[idx] = orig_path
-
-    # Add committed images from disk (use cache unless full_scan requested)
+    
+    # Add committed images from disk
     cat_path = os.path.join(state.output_dir, state.active_cat)
-    if full_scan or state.active_cat not in state._committed_files:
-        # Scan disk and cache the results
-        state._committed_files[state.active_cat] = set()
-        if os.path.exists(cat_path):
-            for filename in os.listdir(cat_path):
-                if filename.startswith(state.active_cat):
-                    state._committed_files[state.active_cat].add(filename)
-
-    # Build index map from cached committed files
-    for filename in state._committed_files.get(state.active_cat, set()):
-        idx = _extract_index(filename)
-        if idx is not None and idx not in state.index_map:
-            state.index_map[idx] = os.path.join(cat_path, filename)
+    if os.path.exists(cat_path):
+        for filename in os.listdir(cat_path):
+            if filename.startswith(state.active_cat):
+                idx = _extract_index(filename)
+                if idx is not None and idx not in state.index_map:
+                    state.index_map[idx] = os.path.join(cat_path, filename)
 
 def _extract_index(filename: str) -> Optional[int]:
     """Extract numeric index from filename (e.g., 'Cat_042.jpg' -> 42)."""
@@ -255,20 +212,6 @@ def _extract_index(filename: str) -> Optional[int]:
         return int(filename.rsplit('_', 1)[1].split('.')[0])
     except (ValueError, IndexError):
         return None
-
-def _add_to_undo_stack(entry: Dict):
-    """Add entry to undo stack with size limit."""
-    state.undo_stack.append(entry)
-    if len(state.undo_stack) > 50:
-        state.undo_stack.pop(0)
-
-def _remove_hotkey_for_category(category: str):
-    """Remove any hotkey assigned to the given category."""
-    to_remove = [hk for hk, c in state.category_hotkeys.items() if c == category]
-    for hk in to_remove:
-        del state.category_hotkeys[hk]
-        if hasattr(state, 'hotkey_by_category'):
-            state.hotkey_by_category.pop(category, None)
 
 # ==========================================
 # ACTIONS
@@ -289,48 +232,54 @@ def action_tag(img_path: str, manual_idx: Optional[int] = None):
         name = f"{state.active_cat}_{idx:03d}_{len(staged_names)+1}{ext}"
     
     # Save to undo stack
-    _add_to_undo_stack({
+    state.undo_stack.append({
         "action": "tag",
         "path": img_path,
         "category": state.active_cat,
         "name": name,
         "index": idx
     })
-
+    if len(state.undo_stack) > 50:  # Limit undo history
+        state.undo_stack.pop(0)
+    
     SorterEngine.stage_image(img_path, state.active_cat, name)
-
+    
     # Only auto-increment if we used the default next_index (not manual)
     if manual_idx is None:
         state.next_index = idx + 1
-
+    
     refresh_staged_info()
-    refresh_ui_minimal()
+    refresh_ui()
 
 def action_untag(img_path: str):
     """Remove staging from an image."""
     # Save to undo stack
     if img_path in state.staged_data:
         info = state.staged_data[img_path]
-        _add_to_undo_stack({
+        state.undo_stack.append({
             "action": "untag",
             "path": img_path,
             "category": info['cat'],
             "name": info['name'],
             "index": _extract_index(info['name'])
         })
-
+        if len(state.undo_stack) > 50:
+            state.undo_stack.pop(0)
+    
     SorterEngine.clear_staged_item(img_path)
     refresh_staged_info()
-    refresh_ui_minimal()
+    refresh_ui()
 
 def action_delete(img_path: str):
     """Delete image to trash."""
     # Save to undo stack
-    _add_to_undo_stack({
+    state.undo_stack.append({
         "action": "delete",
         "path": img_path
     })
-
+    if len(state.undo_stack) > 50:
+        state.undo_stack.pop(0)
+    
     SorterEngine.delete_to_trash(img_path)
     load_images()
 
@@ -356,6 +305,7 @@ def action_undo():
         # Undo delete = restore from trash
         trash_path = os.path.join(os.path.dirname(last["path"]), "_DELETED", os.path.basename(last["path"]))
         if os.path.exists(trash_path):
+            import shutil
             shutil.move(trash_path, last["path"])
             ui.notify(f"Restored: {os.path.basename(last['path'])}", type='info')
         else:
@@ -389,25 +339,17 @@ def action_apply_page():
 
 async def action_apply_global():
     """Apply all staged changes globally."""
-    if state.applying_global:
-        ui.notify("Global apply already in progress", type='warning')
-        return
-
-    state.applying_global = True
     ui.notify("Starting global apply... This may take a while.", type='info')
-    try:
-        await run.io_bound(
-            SorterEngine.commit_global,
-            state.output_dir,
-            state.cleanup_mode,
-            state.batch_mode,
-            state.source_dir,
-            state.profile_name
-        )
-        load_images()
-        ui.notify("Global apply complete!", type='positive')
-    finally:
-        state.applying_global = False
+    await run.io_bound(
+        SorterEngine.commit_global,
+        state.output_dir,
+        state.cleanup_mode,
+        state.batch_mode,
+        state.source_dir,
+        state.profile_name
+    )
+    load_images()
+    ui.notify("Global apply complete!", type='positive')
 
 # ==========================================
 # UI COMPONENTS
@@ -451,9 +393,13 @@ def open_zoom_dialog(path: str, title: Optional[str] = None, show_untag: bool = 
 
 def open_hotkey_dialog(category: str):
     """Open dialog to set/change hotkey for a category."""
-    # Use reverse mapping for O(1) lookup
-    current_hotkey = state.hotkey_by_category.get(category)
-
+    # Find current hotkey if any
+    current_hotkey = None
+    for hk, cat in state.category_hotkeys.items():
+        if cat == category:
+            current_hotkey = hk
+            break
+    
     with ui.dialog() as dialog, ui.card().classes('p-4 bg-gray-800'):
         ui.label(f'Set Hotkey for "{category}"').classes('font-bold text-white mb-2')
         
@@ -471,25 +417,24 @@ def open_hotkey_dialog(category: str):
             key = hotkey_input.value.lower().strip()
             if key and len(key) == 1 and key.isalpha():
                 # Remove old hotkey for this category
-                _remove_hotkey_for_category(category)
-
+                to_remove = [hk for hk, c in state.category_hotkeys.items() if c == category]
+                for hk in to_remove:
+                    del state.category_hotkeys[hk]
+                
                 # Remove if another category had this hotkey
                 if key in state.category_hotkeys:
-                    old_cat = state.category_hotkeys[key]
                     del state.category_hotkeys[key]
-                    if hasattr(state, 'hotkey_by_category'):
-                        state.hotkey_by_category.pop(old_cat, None)
-
+                
                 # Set new hotkey
                 state.category_hotkeys[key] = category
-                if hasattr(state, 'hotkey_by_category'):
-                    state.hotkey_by_category[category] = key
                 ui.notify(f'Hotkey "{key.upper()}" set for {category}', type='positive')
                 dialog.close()
                 render_sidebar()
             elif key == '':
                 # Clear hotkey
-                _remove_hotkey_for_category(category)
+                to_remove = [hk for hk, c in state.category_hotkeys.items() if c == category]
+                for hk in to_remove:
+                    del state.category_hotkeys[hk]
                 ui.notify(f'Hotkey cleared for {category}', type='info')
                 dialog.close()
                 render_sidebar()
@@ -506,69 +451,74 @@ def open_hotkey_dialog(category: str):
     
     dialog.open()
 
-def render_number_grid():
-    """Render the 1-25 number grid for quick index selection."""
-    if state.number_grid_container:
-        state.number_grid_container.clear()
-    else:
-        return
-
-    with state.number_grid_container:
+def render_sidebar():
+    """Render category management sidebar."""
+    state.sidebar_container.clear()
+    
+    with state.sidebar_container:
+        ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2 text-white')
+        
+        # Number grid (1-25)
         with ui.grid(columns=5).classes('gap-1 mb-4 w-full'):
             for i in range(1, 26):
                 is_used = i in state.index_map
                 color = 'green' if is_used else 'grey-9'
-
+                
                 def make_click_handler(num: int):
                     def handler():
                         if num in state.index_map:
+                            # Number is used - open preview
                             img_path = state.index_map[num]
                             is_staged = img_path in state.staged_data
                             open_zoom_dialog(
-                                img_path,
+                                img_path, 
                                 f"{state.active_cat} #{num}",
                                 show_untag=is_staged,
                                 show_jump=True
                             )
                         else:
+                            # Number is free - set as next index
                             state.next_index = num
-                            render_number_grid()
+                            render_sidebar()
                     return handler
-
+                
                 ui.button(str(i), on_click=make_click_handler(i)) \
                   .props(f'color={color} size=sm flat') \
                   .classes('w-full border border-gray-800')
-
-def render_category_list():
-    """Render the list of categories with hotkey buttons."""
-    if state.category_list_container:
-        state.category_list_container.clear()
-    else:
-        return
-
-    with state.category_list_container:
+        
+        # Category Manager (expanded)
+        ui.label("📂 Categories").classes('text-sm font-bold text-gray-400 mt-2')
+        
         categories = state.get_categories()
-
+        
+        # Category list with hotkey buttons
         for cat in categories:
             is_active = cat == state.active_cat
-            hotkey = state.hotkey_by_category.get(cat)
-
+            hotkey = None
+            # Find if this category has a hotkey
+            for hk, cat_name in state.category_hotkeys.items():
+                if cat_name == cat:
+                    hotkey = hk
+                    break
+            
             with ui.row().classes('w-full items-center no-wrap gap-1'):
+                # Category button
                 ui.button(
                     cat,
                     on_click=lambda c=cat: (
                         setattr(state, 'active_cat', c),
-                        refresh_staged_info(full_scan=(c not in state._committed_files)),
+                        refresh_staged_info(),
                         render_sidebar()
                     )
                 ).props(f'{"" if is_active else "flat"} color={"green" if is_active else "grey"} dense') \
                  .classes('flex-grow text-left')
-
+                
+                # Hotkey badge/button
                 def make_hotkey_handler(category):
                     def handler():
                         open_hotkey_dialog(category)
                     return handler
-
+                
                 if hotkey:
                     ui.button(hotkey.upper(), on_click=make_hotkey_handler(cat)) \
                         .props('flat dense color=blue size=sm').classes('w-8')
@@ -576,61 +526,48 @@ def render_category_list():
                     ui.button('+', on_click=make_hotkey_handler(cat)) \
                         .props('flat dense color=grey size=sm').classes('w-8') \
                         .tooltip('Set hotkey')
-
+        
         # Add new category
         with ui.row().classes('w-full items-center no-wrap mt-2'):
             new_cat_input = ui.input(placeholder='New category...') \
                 .props('dense outlined dark').classes('flex-grow')
-
+            
             def add_category():
                 if new_cat_input.value:
                     SorterEngine.add_category(new_cat_input.value, state.profile_name)
                     state.active_cat = new_cat_input.value
                     refresh_staged_info()
                     render_sidebar()
-
+            
             ui.button(icon='add', on_click=add_category).props('flat color=green')
-
+        
         # Delete category
         with ui.expansion('Danger Zone', icon='warning').classes('w-full text-red-400 mt-2'):
             def delete_category():
-                _remove_hotkey_for_category(state.active_cat)
+                # Also remove any hotkey for this category
+                to_remove = [hk for hk, c in state.category_hotkeys.items() if c == state.active_cat]
+                for hk in to_remove:
+                    del state.category_hotkeys[hk]
                 SorterEngine.delete_category(state.active_cat, state.profile_name)
                 refresh_staged_info()
                 render_sidebar()
-
+            
             ui.button('DELETE CATEGORY', color='red', on_click=delete_category).classes('w-full')
-
-def render_sidebar():
-    """Render category management sidebar."""
-    state.sidebar_container.clear()
-
-    with state.sidebar_container:
-        ui.label("🏷️ Category Manager").classes('text-xl font-bold mb-2 text-white')
-
-        # Number grid container
-        state.number_grid_container = ui.column().classes('w-full')
-        render_number_grid()
-
-        # Category Manager
-        ui.label("📂 Categories").classes('text-sm font-bold text-gray-400 mt-2')
-        state.category_list_container = ui.column().classes('w-full')
-        render_category_list()
-
+        
         ui.separator().classes('my-4 bg-gray-700')
-
+        
         # Index counter
-        state.index_display_container = ui.row().classes('w-full items-end no-wrap')
-        with state.index_display_container:
+        with ui.row().classes('w-full items-end no-wrap'):
             ui.number(label="Next Index", min=1, precision=0) \
                 .bind_value(state, 'next_index') \
                 .classes('flex-grow').props('dark outlined')
-
+            
             def reset_index():
                 state.next_index = (max(state.index_map.keys()) + 1) if state.index_map else 1
-
+                render_sidebar()
+            
             ui.button('🔄', on_click=reset_index).props('flat color=white')
-
+        
         # Keyboard shortcuts help
         ui.separator().classes('my-4 bg-gray-700')
         with ui.expansion('⌨️ Keyboard Shortcuts', icon='keyboard').classes('w-full text-gray-400'):
@@ -716,29 +653,19 @@ def render_image_card(img_path: str):
                     on_click=lambda p=img_path, i=local_idx: action_tag(p, int(i.value))
                 ).classes('w-2/3').props('color=green dense')
 
-def render_stats():
-    """Render only the stats labels (tagged/untagged counts)."""
-    if state.stats_container:
-        state.stats_container.clear()
-    else:
-        return
-
-    stats = state.get_stats()
-    with state.stats_container:
-        ui.label(f"📁 {stats['total']} images").classes('text-gray-400')
-        ui.label(f"🏷️ {stats['tagged']} tagged").classes('text-green-400')
-        ui.label(f"⬜ {stats['untagged']} untagged").classes('text-gray-500')
-
 def render_pagination():
     """Render pagination controls."""
     state.pagination_container.clear()
-
+    
+    stats = state.get_stats()
+    
     with state.pagination_container:
         # Stats bar
         with ui.row().classes('w-full justify-center items-center gap-4 mb-2'):
-            state.stats_container = ui.row().classes('gap-4')
-            render_stats()
-
+            ui.label(f"📁 {stats['total']} images").classes('text-gray-400')
+            ui.label(f"🏷️ {stats['tagged']} tagged").classes('text-green-400')
+            ui.label(f"⬜ {stats['untagged']} untagged").classes('text-gray-500')
+            
             # Filter toggle
             filter_colors = {"all": "grey", "tagged": "green", "untagged": "orange"}
             filter_icons = {"all": "filter_list", "tagged": "label", "untagged": "label_off"}
@@ -751,13 +678,13 @@ def render_pagination():
                     refresh_ui()
                 )
             ).props(f'flat color={filter_colors[state.filter_mode]}').classes('ml-4')
-
+            
             # Save button
             ui.button(
                 icon='save',
                 on_click=action_save_tags
             ).props('flat color=blue').tooltip('Save tags (Ctrl+S)')
-
+            
             # Undo button
             ui.button(
                 icon='undo',
@@ -811,12 +738,6 @@ def refresh_ui():
     render_pagination()
     render_gallery()
 
-def refresh_ui_minimal():
-    """Minimal refresh after tag/untag - only stats, number grid, and gallery."""
-    render_stats()
-    render_number_grid()
-    render_gallery()
-
 def handle_keyboard(e):
     """Handle keyboard navigation and shortcuts (fallback)."""
     if not e.action.keydown:
@@ -867,6 +788,46 @@ def handle_keyboard(e):
         current_idx = modes.index(state.filter_mode)
         state.filter_mode = modes[(current_idx + 1) % 3]
         state.page = 0  # Reset to first page when changing filter
+        refresh_ui()
+        ui.notify(f"Filter: {state.filter_mode}", type='info')
+
+def process_key(key: str, ctrl: bool):
+    """Process keyboard input from JS event."""
+    # Navigation
+    if key == 'arrowleft' and state.page > 0:
+        set_page(state.page - 1)
+    elif key == 'arrowright' and state.page < state.total_pages - 1:
+        set_page(state.page + 1)
+    # Undo
+    elif key == 'z' and ctrl:
+        action_undo()
+    # Save
+    elif key == 's' and ctrl:
+        action_save_tags()
+    # Custom category hotkeys
+    elif not ctrl and len(key) == 1 and key.isalpha() and key in state.category_hotkeys:
+        state.active_cat = state.category_hotkeys[key]
+        refresh_staged_info()
+        refresh_ui()
+        ui.notify(f"Category: {state.active_cat}", type='info')
+    # Tag with number
+    elif key in '123456789' and not ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image, int(key))
+    # Tag with next index
+    elif key == '0' and not ctrl:
+        if state.hovered_image and state.hovered_image not in state.staged_data:
+            action_tag(state.hovered_image)
+    # Untag (only if 'u' not assigned to category)
+    elif key == 'u' and not ctrl and 'u' not in state.category_hotkeys:
+        if state.hovered_image and state.hovered_image in state.staged_data:
+            action_untag(state.hovered_image)
+    # Filter (only if 'f' not assigned to category)
+    elif key == 'f' and not ctrl and 'f' not in state.category_hotkeys:
+        modes = ["all", "untagged", "tagged"]
+        current_idx = modes.index(state.filter_mode)
+        state.filter_mode = modes[(current_idx + 1) % 3]
+        state.page = 0
         refresh_ui()
         ui.notify(f"Filter: {state.filter_mode}", type='info')
 
@@ -1029,13 +990,17 @@ build_header()
 build_sidebar()
 build_main_content()
 
-# Prevent browser defaults for keyboard shortcuts (e.g., Ctrl+S save dialog)
+# JavaScript keyboard handler for Firefox compatibility
 ui.add_body_html('''
 <script>
 document.addEventListener('keydown', function(e) {
+    // Skip if typing in input
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    
     const key = e.key.toLowerCase();
     const ctrl = e.ctrlKey || e.metaKey;
+    
+    // Prevent browser defaults for our shortcuts
     if (ctrl && (key === 's' || key === 'z')) {
         e.preventDefault();
     }
