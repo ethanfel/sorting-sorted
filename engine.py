@@ -1,11 +1,27 @@
 import os
 import shutil
 import sqlite3
+from contextlib import contextmanager
 from PIL import Image
 from io import BytesIO
 
 class SorterEngine:
     DB_PATH = "/app/sorter_database.db"
+
+    @staticmethod
+    @contextmanager
+    def get_db():
+        """Context manager for database connections.
+        Ensures proper commit/rollback and always closes connection."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     # --- 1. DATABASE INITIALIZATION ---
     @staticmethod
@@ -51,7 +67,15 @@ class SorterEngine:
         if cursor.fetchone()[0] == 0:
             for cat in ["_TRASH", "control", "Default", "Action", "Solo"]:
                 cursor.execute("INSERT OR IGNORE INTO categories VALUES (?)", (cat,))
-        
+
+        # --- PERFORMANCE INDEXES ---
+        # Index for staging_area queries filtered by category
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_staging_category ON staging_area(target_category)")
+        # Index for folder_tags queries filtered by profile and folder_path
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_folder_tags_profile ON folder_tags(profile, folder_path)")
+        # Index for profile_categories lookups
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_profile_categories ON profile_categories(profile)")
+
         conn.commit()
         conn.close()
 
@@ -146,42 +170,48 @@ class SorterEngine:
 
     @staticmethod
     def load_profiles():
-        """Loads all workspace presets including pairing settings."""
+        """Loads all workspace presets including pairing settings.
+        Uses LEFT JOIN to fetch all data in a single query (fixes N+1 problem)."""
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM profiles")
-        rows = cursor.fetchall()
-        
-        # Ensure pairing_settings table exists
-        cursor.execute('''CREATE TABLE IF NOT EXISTS pairing_settings 
-            (profile TEXT PRIMARY KEY, 
-             adjacent_folder TEXT, 
-             main_category TEXT, 
-             adj_category TEXT, 
-             main_output TEXT, 
-             adj_output TEXT, 
+
+        # Ensure pairing_settings table exists before JOIN
+        cursor.execute('''CREATE TABLE IF NOT EXISTS pairing_settings
+            (profile TEXT PRIMARY KEY,
+             adjacent_folder TEXT,
+             main_category TEXT,
+             adj_category TEXT,
+             main_output TEXT,
+             adj_output TEXT,
              time_window INTEGER)''')
-        
+
+        # Single query with LEFT JOIN - eliminates N+1 queries
+        cursor.execute('''
+            SELECT p.name, p.tab1_target, p.tab2_target, p.tab2_control,
+                   p.tab4_source, p.tab4_out, p.mode, p.tab5_source, p.tab5_out,
+                   ps.adjacent_folder, ps.main_category, ps.adj_category,
+                   ps.main_output, ps.adj_output, ps.time_window
+            FROM profiles p
+            LEFT JOIN pairing_settings ps ON p.name = ps.profile
+        ''')
+        rows = cursor.fetchall()
+
         profiles = {}
         for r in rows:
             profile_name = r[0]
             profiles[profile_name] = {
-                "tab1_target": r[1], "tab2_target": r[2], "tab2_control": r[3], 
+                "tab1_target": r[1], "tab2_target": r[2], "tab2_control": r[3],
                 "tab4_source": r[4], "tab4_out": r[5], "mode": r[6],
-                "tab5_source": r[7], "tab5_out": r[8]
+                "tab5_source": r[7], "tab5_out": r[8],
+                # Pairing settings from JOIN (with defaults for NULL)
+                "pair_adjacent_folder": r[9] or "",
+                "pair_main_category": r[10] or "control",
+                "pair_adj_category": r[11] or "control",
+                "pair_main_output": r[12] or "/storage",
+                "pair_adj_output": r[13] or "/storage",
+                "pair_time_window": r[14] or 60
             }
-            
-            # Load pairing settings for this profile
-            cursor.execute("SELECT * FROM pairing_settings WHERE profile = ?", (profile_name,))
-            pair_row = cursor.fetchone()
-            if pair_row:
-                profiles[profile_name]["pair_adjacent_folder"] = pair_row[1] or ""
-                profiles[profile_name]["pair_main_category"] = pair_row[2] or "control"
-                profiles[profile_name]["pair_adj_category"] = pair_row[3] or "control"
-                profiles[profile_name]["pair_main_output"] = pair_row[4] or "/storage"
-                profiles[profile_name]["pair_adj_output"] = pair_row[5] or "/storage"
-                profiles[profile_name]["pair_time_window"] = pair_row[6] or 60
-        
+
         conn.close()
         return profiles
 
@@ -354,40 +384,33 @@ class SorterEngine:
     @staticmethod
     def stage_image(original_path, category, new_name):
         """Records a pending rename/move in the database."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)", (original_path, category, new_name))
-        conn.commit()
-        conn.close()
+        with SorterEngine.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO staging_area VALUES (?, ?, ?, 1)", (original_path, category, new_name))
 
     @staticmethod
     def clear_staged_item(original_path):
         """Removes an item from the pending staging area."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
-        conn.commit()
-        conn.close()
+        with SorterEngine.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (original_path,))
 
     @staticmethod
     def clear_staging_area():
         """Clears all items from the staging area."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM staging_area")
-        conn.commit()
-        conn.close()
+        with SorterEngine.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM staging_area")
 
     @staticmethod
     def get_staged_data():
         """Retrieves current tagged/staged images."""
-        conn = sqlite3.connect(SorterEngine.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM staging_area")
-        rows = cursor.fetchall()
-        conn.close()
-        # FIXED: Added "marked": r[3] to the dictionary
-        return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
+        with SorterEngine.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM staging_area")
+            rows = cursor.fetchall()
+            # FIXED: Added "marked": r[3] to the dictionary
+            return {r[0]: {"cat": r[1], "name": r[2], "marked": r[3]} for r in rows}
         
     @staticmethod
     def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None, profile=None):

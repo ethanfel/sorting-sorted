@@ -1,7 +1,8 @@
 import os
 import math
 import asyncio
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Tuple
+from functools import partial
 from nicegui import ui, app, run
 from fastapi import Response
 from engine import SorterEngine
@@ -48,6 +49,12 @@ class AppState:
         self.staged_data: Dict = {}
         self.green_dots: Set[int] = set()
         self.index_map: Dict[int, str] = {}
+
+        # Performance caches (Phase 1 optimizations)
+        self._cached_tagged_count: int = 0  # Cached count for get_stats()
+        self._green_dots_dirty: bool = True  # Lazy green dots calculation
+        self._last_disk_scan_key: str = ""  # Track output_dir + category for lazy disk scan
+        self._disk_index_map: Dict[int, str] = {}  # Cached disk scan results
         
         # UI Containers (populated later)
         self.sidebar_container = None
@@ -59,7 +66,7 @@ class AppState:
         self.pair_time_window = 60  # seconds +/- for matching
         self.pair_current_idx = 0  # Current image index in pairing mode
         self.pair_adjacent_folder = ""  # Path to adjacent folder
-        self.pair_adjacent_images: List[str] = []  # Images from adjacent folder
+        self.pair_adjacent_data: List[Tuple[str, float]] = []  # (path, timestamp) tuples for O(1) lookup
         self.pair_matches: List[str] = []  # Current matches for selected image
         self.pair_selected_match = None  # Currently selected match
         self.pairing_container = None  # UI container for pairing mode
@@ -165,10 +172,22 @@ class AppState:
         return filtered[start : start + self.page_size]
     
     def get_stats(self) -> Dict:
-        """Get image statistics for display."""
+        """Get image statistics for display. Uses cached tagged count."""
         total = len(self.all_images)
-        tagged = len([img for img in self.all_images if img in self.staged_data])
+        tagged = self._cached_tagged_count
         return {"total": total, "tagged": tagged, "untagged": total - tagged}
+
+    def get_green_dots(self) -> Set[int]:
+        """Lazily calculate green dots (pages with tagged images).
+        Only recalculates when _green_dots_dirty is True."""
+        if self._green_dots_dirty:
+            self.green_dots.clear()
+            staged_keys = set(self.staged_data.keys())
+            for idx, img_path in enumerate(self.all_images):
+                if img_path in staged_keys:
+                    self.green_dots.add(idx // self.page_size)
+            self._green_dots_dirty = False
+        return self.green_dots
 
 state = AppState()
 
@@ -237,36 +256,46 @@ def get_file_timestamp(filepath: str) -> Optional[float]:
         return None
 
 def load_adjacent_folder():
-    """Load images from adjacent folder for pairing, excluding main folder."""
+    """Load images from adjacent folder for pairing, excluding main folder.
+    Caches timestamps at load time to avoid repeated syscalls during navigation."""
     if not state.pair_adjacent_folder or not os.path.exists(state.pair_adjacent_folder):
-        state.pair_adjacent_images = []
+        state.pair_adjacent_data = []
         ui.notify("Adjacent folder path is empty or doesn't exist", type='warning')
         return
-    
+
     # Exclude the main source folder to avoid duplicates
     exclude = [state.source_dir] if state.source_dir else []
-    
-    state.pair_adjacent_images = SorterEngine.get_images(
-        state.pair_adjacent_folder, 
-        recursive=True, 
+
+    images = SorterEngine.get_images(
+        state.pair_adjacent_folder,
+        recursive=True,
         exclude_paths=exclude
     )
-    ui.notify(f"Loaded {len(state.pair_adjacent_images)} images from adjacent folder", type='info')
+
+    # Cache timestamps at load time (one-time cost instead of per-navigation)
+    state.pair_adjacent_data = []
+    for img_path in images:
+        ts = get_file_timestamp(img_path)
+        if ts is not None:
+            state.pair_adjacent_data.append((img_path, ts))
+
+    ui.notify(f"Loaded {len(state.pair_adjacent_data)} images from adjacent folder", type='info')
 
 def find_time_matches(source_image: str) -> List[str]:
-    """Find images in adjacent folder within time window of source image."""
+    """Find images in adjacent folder within time window of source image.
+    Uses cached timestamps from pair_adjacent_data for O(n) without syscalls."""
     source_time = get_file_timestamp(source_image)
     if source_time is None:
         return []
-    
+
+    window = state.pair_time_window
     matches = []
-    for adj_image in state.pair_adjacent_images:
-        adj_time = get_file_timestamp(adj_image)
-        if adj_time is not None:
-            time_diff = abs(source_time - adj_time)
-            if time_diff <= state.pair_time_window:
-                matches.append((adj_image, time_diff))
-    
+    # Use pre-cached timestamps - no syscalls needed
+    for adj_path, adj_time in state.pair_adjacent_data:
+        time_diff = abs(source_time - adj_time)
+        if time_diff <= window:
+            matches.append((adj_path, time_diff))
+
     # Sort by time difference (closest first)
     matches.sort(key=lambda x: x[1])
     return [m[0] for m in matches]
@@ -459,47 +488,62 @@ def select_match(match_path: str):
     state.pair_selected_match = match_path
     render_pairing_view()
 
-def refresh_staged_info():
-    """Update staged data and index maps."""
+def refresh_staged_info(force_disk_scan: bool = False):
+    """Update staged data and index maps.
+
+    Args:
+        force_disk_scan: If True, rescan disk even if category hasn't changed.
+                        Set this after APPLY operations that modify files.
+    """
     state.staged_data = SorterEngine.get_staged_data()
-    
-    # Update green dots (pages with staged images)
-    state.green_dots.clear()
     staged_keys = set(state.staged_data.keys())
-    for idx, img_path in enumerate(state.all_images):
-        if img_path in staged_keys:
-            state.green_dots.add(idx // state.page_size)
-    
+
+    # Update cached tagged count (O(n) but simpler than set intersection)
+    state._cached_tagged_count = sum(1 for img in state.all_images if img in staged_keys)
+
+    # Mark green dots as dirty (lazy calculation)
+    state._green_dots_dirty = True
+
     # Build index map for active category (gallery mode)
     state.index_map.clear()
-    
+
     # Add staged images
     for orig_path, info in state.staged_data.items():
         if info['cat'] == state.active_cat:
             idx = _extract_index(info['name'])
             if idx is not None:
                 state.index_map[idx] = orig_path
-    
-    # Add committed images from disk
-    cat_path = os.path.join(state.output_dir, state.active_cat)
-    if os.path.exists(cat_path):
-        for filename in os.listdir(cat_path):
-            if filename.startswith(state.active_cat):
-                idx = _extract_index(filename)
-                if idx is not None and idx not in state.index_map:
-                    state.index_map[idx] = os.path.join(cat_path, filename)
-    
+
+    # Lazy disk scan: only rescan when output_dir+category changes or forced
+    disk_scan_key = f"{state.output_dir}:{state.active_cat}"
+    cache_valid = state._last_disk_scan_key == disk_scan_key
+    if not cache_valid or force_disk_scan:
+        state._last_disk_scan_key = disk_scan_key
+        state._disk_index_map.clear()
+        cat_path = os.path.join(state.output_dir, state.active_cat)
+        if os.path.exists(cat_path):
+            for filename in os.listdir(cat_path):
+                if filename.startswith(state.active_cat):
+                    idx = _extract_index(filename)
+                    if idx is not None:
+                        state._disk_index_map[idx] = os.path.join(cat_path, filename)
+
+    # Merge disk results into index_map (staged takes precedence)
+    for idx, path in state._disk_index_map.items():
+        if idx not in state.index_map:
+            state.index_map[idx] = path
+
     # Build pairing mode index map (both categories)
     state.pair_index_map.clear()
-    
+
     for orig_path, info in state.staged_data.items():
         idx = _extract_index(info['name'])
         if idx is None:
             continue
-        
+
         if idx not in state.pair_index_map:
             state.pair_index_map[idx] = {"main": None, "adj": None}
-        
+
         # Check if this is from main or adjacent category
         if info['cat'] == state.pair_main_category:
             state.pair_index_map[idx]["main"] = orig_path
@@ -543,13 +587,15 @@ def action_tag(img_path: str, manual_idx: Optional[int] = None):
         state.undo_stack.pop(0)
     
     SorterEngine.stage_image(img_path, state.active_cat, name)
-    
+
     # Only auto-increment if we used the default next_index (not manual)
     if manual_idx is None:
         state.next_index = idx + 1
-    
+
     refresh_staged_info()
-    refresh_ui()
+    # Use targeted refresh - sidebar index grid needs update, but skip heavy rebuild
+    render_sidebar()  # Update index grid to show new tag
+    refresh_grid_only()  # Just grid + pagination stats
 
 def action_untag(img_path: str):
     """Remove staging from an image."""
@@ -568,7 +614,9 @@ def action_untag(img_path: str):
     
     SorterEngine.clear_staged_item(img_path)
     refresh_staged_info()
-    refresh_ui()
+    # Use targeted refresh - sidebar index grid needs update
+    render_sidebar()  # Update index grid to show removed tag
+    refresh_grid_only()  # Just grid + pagination stats
 
 def action_delete(img_path: str):
     """Delete image to trash."""
@@ -632,9 +680,11 @@ def action_apply_page():
     if not batch:
         ui.notify("No images on current page", type='warning')
         return
-    
+
     SorterEngine.commit_batch(batch, state.output_dir, state.cleanup_mode, state.batch_mode)
     ui.notify(f"Page processed ({state.batch_mode})", type='positive')
+    # Force disk rescan since files were committed
+    state._last_disk_scan_key = ""
     load_images()
 
 async def action_apply_global():
@@ -648,6 +698,8 @@ async def action_apply_global():
         state.source_dir,
         state.profile_name
     )
+    # Force disk rescan since files were committed
+    state._last_disk_scan_key = ""
     load_images()
     ui.notify("Global apply complete!", type='positive')
 
@@ -991,42 +1043,51 @@ def render_gallery():
             for img_path in batch:
                 render_image_card(img_path)
 
+def _set_hovered(path: str):
+    """Helper for hover tracking - used with partial for memory efficiency."""
+    state.hovered_image = path
+
+def _clear_hovered():
+    """Helper for hover tracking - used with partial for memory efficiency."""
+    state.hovered_image = None
+
 def render_image_card(img_path: str):
-    """Render individual image card."""
+    """Render individual image card.
+    Uses functools.partial instead of lambdas for better memory efficiency."""
     is_staged = img_path in state.staged_data
     thumb_size = 800
-    
+
     card = ui.card().classes('p-2 bg-gray-900 border border-gray-700 no-shadow hover:border-green-500 transition-colors')
-    
+
     with card:
-        # Track hover for keyboard shortcuts
-        card.on('mouseenter', lambda p=img_path: setattr(state, 'hovered_image', p))
-        card.on('mouseleave', lambda: setattr(state, 'hovered_image', None))
-        
+        # Track hover for keyboard shortcuts - using partial instead of lambda
+        card.on('mouseenter', partial(_set_hovered, img_path))
+        card.on('mouseleave', _clear_hovered)
+
         # Header with filename and actions
         with ui.row().classes('w-full justify-between no-wrap mb-1'):
             ui.label(os.path.basename(img_path)[:15]).classes('text-xs text-gray-400 truncate')
             with ui.row().classes('gap-0'):
                 ui.button(
                     icon='zoom_in',
-                    on_click=lambda p=img_path: open_zoom_dialog(p)
+                    on_click=partial(open_zoom_dialog, img_path)
                 ).props('flat size=sm dense color=white')
                 ui.button(
                     icon='delete',
-                    on_click=lambda p=img_path: action_delete(p)
+                    on_click=partial(action_delete, img_path)
                 ).props('flat size=sm dense color=red')
-        
+
         # Thumbnail with double-click to tag
         img = ui.image(f"/thumbnail?path={img_path}&size={thumb_size}&q={state.preview_quality}") \
             .classes('w-full h-64 bg-black rounded cursor-pointer') \
             .props('fit=contain no-spinner')
-        
-        # Double-click to tag (if not already tagged)
+
+        # Double-click to tag (if not already tagged) - using partial
         if not is_staged:
-            img.on('dblclick', lambda p=img_path: action_tag(p))
+            img.on('dblclick', partial(action_tag, img_path))
         else:
-            img.on('dblclick', lambda p=img_path: action_untag(p))
-        
+            img.on('dblclick', partial(action_untag, img_path))
+
         # Tagging UI
         if is_staged:
             info = state.staged_data[img_path]
@@ -1035,12 +1096,13 @@ def render_image_card(img_path: str):
             ui.label(f"🏷️ {info['cat']}").classes('text-center text-green-400 text-xs py-1 w-full')
             ui.button(
                 f"Untag (#{idx_str})",
-                on_click=lambda p=img_path: action_untag(p)
+                on_click=partial(action_untag, img_path)
             ).props('flat color=grey-5 dense').classes('w-full')
         else:
             with ui.row().classes('w-full no-wrap mt-2 gap-1'):
                 local_idx = ui.number(value=state.next_index, precision=0) \
                     .props('dense dark outlined').classes('w-1/3')
+                # Note: This one still needs lambda due to dynamic local_idx.value access
                 ui.button(
                     'Tag',
                     on_click=lambda p=img_path, i=local_idx: action_tag(p, int(i.value))
@@ -1108,8 +1170,9 @@ def render_pagination():
             start = max(0, state.page - 2)
             end = min(state.total_pages, state.page + 3)
             
+            green_dots = state.get_green_dots()  # Lazy calculation
             for p in range(start, end):
-                dot = " 🟢" if p in state.green_dots else ""
+                dot = " 🟢" if p in green_dots else ""
                 color = "white" if p == state.page else "grey-6"
                 ui.button(
                     f"{p+1}{dot}",
@@ -1128,6 +1191,12 @@ def set_page(p: int):
 def refresh_ui():
     """Refresh all UI components."""
     render_sidebar()
+    render_pagination()
+    render_gallery()
+
+def refresh_grid_only():
+    """Refresh only the grid and pagination stats - skip sidebar rebuild.
+    Use for tag/untag operations where sidebar doesn't need full rebuild."""
     render_pagination()
     render_gallery()
 
