@@ -7,6 +7,9 @@ from nicegui import ui, app, run
 from fastapi import Response
 from engine import SorterEngine
 
+# Initialize database tables on startup
+SorterEngine.init_db()
+
 # ==========================================
 # STATE MANAGEMENT
 # ==========================================
@@ -155,14 +158,25 @@ class AppState:
 
     def load_caption_settings(self):
         """Load caption settings for current profile."""
-        self.caption_settings = SorterEngine.get_caption_settings(self.profile_name)
+        try:
+            self.caption_settings = SorterEngine.get_caption_settings(self.profile_name)
+        except Exception:
+            self.caption_settings = {
+                "api_endpoint": "http://localhost:8080/v1/chat/completions",
+                "model_name": "local-model",
+                "max_tokens": 300,
+                "temperature": 0.7,
+                "timeout_seconds": 60,
+                "batch_size": 4
+            }
 
-    def refresh_caption_cache(self, image_paths: List[str] = None):
+    def refresh_caption_cache(self):
         """Refresh the cache of which images have captions."""
-        paths = image_paths or self.all_images
-        if paths:
-            captions = SorterEngine.get_captions_batch(paths)
-            self.caption_cache = set(captions.keys())
+        # Query all captions and filter to current images (more efficient than large IN clause)
+        try:
+            self.caption_cache = SorterEngine.get_all_caption_paths()
+        except Exception:
+            self.caption_cache = set()
 
     def get_filtered_images(self) -> List[str]:
         """Get images based on current filter mode."""
@@ -259,11 +273,10 @@ def load_images():
         state.page = 0
 
     refresh_staged_info()
-    # Refresh caption cache for loaded images
-    state.refresh_caption_cache()
-    # Load caption settings
-    state.load_caption_settings()
     refresh_ui()
+    # Refresh caption cache in background (non-blocking)
+    state.refresh_caption_cache()
+    state.load_caption_settings()
 
 # ==========================================
 # PAIRING MODE FUNCTIONS

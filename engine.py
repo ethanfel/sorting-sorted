@@ -47,9 +47,19 @@ class SorterEngine:
             (source_path TEXT PRIMARY KEY, category TEXT, action_type TEXT)''')
         
         # --- NEW: FOLDER TAGS TABLE (persists tags by folder) ---
-        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags 
-            (folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
-             PRIMARY KEY (folder_path, filename))''')
+        # Check if old schema exists (without profile column) and migrate
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='folder_tags'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(folder_tags)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'profile' not in columns:
+                # Migrate: drop old table and recreate with profile column
+                cursor.execute("DROP TABLE folder_tags")
+                conn.commit()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS folder_tags
+            (profile TEXT, folder_path TEXT, filename TEXT, category TEXT, tag_index INTEGER,
+             PRIMARY KEY (profile, folder_path, filename))''')
         
         # --- NEW: PROFILE CATEGORIES TABLE (each profile has its own categories) ---
         cursor.execute('''CREATE TABLE IF NOT EXISTS profile_categories 
@@ -1062,6 +1072,21 @@ class SorterEngine:
         cursor.execute("DELETE FROM image_captions WHERE image_path = ?", (image_path,))
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def get_all_caption_paths():
+        """Get set of all image paths that have captions."""
+        conn = sqlite3.connect(SorterEngine.DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_captions
+            (image_path TEXT PRIMARY KEY, caption TEXT, model TEXT,
+             generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        cursor.execute("SELECT image_path FROM image_captions")
+        result = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        return result
 
     # --- 10. VLLM API CAPTIONING ---
     @staticmethod
