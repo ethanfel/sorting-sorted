@@ -450,23 +450,25 @@ class SorterEngine:
         
     @staticmethod
     def commit_global(output_root, cleanup_mode, operation="Copy", source_root=None, profile=None):
-        """Commits ALL staged files and fixes permissions."""
+        """Commits ALL staged files and fixes permissions.
+        Returns dict mapping original_path -> {dest, cat} for committed files."""
         data = SorterEngine.get_staged_data()
-        
+        committed = {}
+
         # Save folder tags BEFORE processing (so we can restore them later)
         if source_root:
             SorterEngine.save_folder_tags(source_root, profile)
-        
+
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        
+
         if not os.path.exists(output_root): os.makedirs(output_root, exist_ok=True)
-        
+
         # 1. Process all Staged Items
         for old_p, info in data.items():
             if os.path.exists(old_p):
                 final_dst = os.path.join(output_root, info['name'])
-                
+
                 if os.path.exists(final_dst):
                     root, ext = os.path.splitext(info['name'])
                     c = 1
@@ -478,12 +480,15 @@ class SorterEngine:
                     shutil.copy2(old_p, final_dst)
                 else:
                     shutil.move(old_p, final_dst)
-                
+
                 # --- FIX PERMISSIONS ---
                 SorterEngine.fix_permissions(final_dst)
-                
+
+                # Track actual destination
+                committed[old_p] = {"dest": final_dst, "cat": info['cat']}
+
                 # Log History
-                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
+                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)",
                                (old_p, info['cat'], operation))
 
         # 2. Global Cleanup
@@ -495,16 +500,17 @@ class SorterEngine:
                         unused_dir = os.path.join(source_root, "unused")
                         os.makedirs(unused_dir, exist_ok=True)
                         dest_unused = os.path.join(unused_dir, os.path.basename(img_p))
-                        
+
                         shutil.move(img_p, dest_unused)
                         SorterEngine.fix_permissions(dest_unused)
-                        
-                    elif cleanup_mode == "Delete": 
+
+                    elif cleanup_mode == "Delete":
                         os.remove(img_p)
 
         cursor.execute("DELETE FROM staging_area")
         conn.commit()
         conn.close()
+        return committed
 
     # --- 6. CORE UTILITIES (SYNC & UNDO) ---
     @staticmethod
@@ -616,21 +622,23 @@ class SorterEngine:
 
     @staticmethod
     def commit_batch(file_list, output_root, cleanup_mode, operation="Copy"):
-        """Commits files and fixes permissions."""
+        """Commits files and fixes permissions.
+        Returns dict mapping original_path -> actual_dest_path for committed files."""
         data = SorterEngine.get_staged_data()
         conn = sqlite3.connect(SorterEngine.DB_PATH)
         cursor = conn.cursor()
-        
+        committed = {}
+
         if not os.path.exists(output_root): os.makedirs(output_root, exist_ok=True)
-        
+
         for file_path in file_list:
             if not os.path.exists(file_path): continue
-            
+
             # --- CASE A: Tagged ---
             if file_path in data and data[file_path]['marked']:
                 info = data[file_path]
                 final_dst = os.path.join(output_root, info['name'])
-                
+
                 # Collision Check
                 if os.path.exists(final_dst):
                     root, ext = os.path.splitext(info['name'])
@@ -638,7 +646,7 @@ class SorterEngine:
                     while os.path.exists(final_dst):
                          final_dst = os.path.join(output_root, f"{root}_{c}{ext}")
                          c += 1
-                
+
                 # Perform Action
                 if operation == "Copy":
                     shutil.copy2(file_path, final_dst)
@@ -648,26 +656,30 @@ class SorterEngine:
                 # --- FIX PERMISSIONS ---
                 SorterEngine.fix_permissions(final_dst)
 
+                # Track actual destination
+                committed[file_path] = {"dest": final_dst, "cat": info['cat']}
+
                 # Update DB
                 cursor.execute("DELETE FROM staging_area WHERE original_path = ?", (file_path,))
-                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)", 
+                cursor.execute("INSERT OR REPLACE INTO processed_log VALUES (?, ?, ?)",
                                (file_path, info['cat'], operation))
-                
+
             # --- CASE B: Cleanup ---
             elif cleanup_mode != "Keep":
                 if cleanup_mode == "Move to Unused":
                     unused_dir = os.path.join(os.path.dirname(file_path), "unused")
                     os.makedirs(unused_dir, exist_ok=True)
                     dest_unused = os.path.join(unused_dir, os.path.basename(file_path))
-                    
+
                     shutil.move(file_path, dest_unused)
                     SorterEngine.fix_permissions(dest_unused) # Fix here too
-                    
+
                 elif cleanup_mode == "Delete":
                     os.remove(file_path)
-        
+
         conn.commit()
         conn.close()
+        return committed
 
     @staticmethod
     def rename_category(old_name, new_name):

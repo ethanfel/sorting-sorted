@@ -273,10 +273,10 @@ def load_images():
         state.page = 0
 
     refresh_staged_info()
-    refresh_ui()
-    # Refresh caption cache in background (non-blocking)
+    # Load caption data before rendering so indicators appear on cards
     state.refresh_caption_cache()
     state.load_caption_settings()
+    refresh_ui()
 
 # ==========================================
 # PAIRING MODE FUNCTIONS
@@ -715,24 +715,16 @@ async def action_apply_page():
         ui.notify("No images on current page", type='warning')
         return
 
-    # Get tagged images and their categories before commit (they'll be moved/copied)
-    tagged_batch = []
-    for img_path in batch:
-        if img_path in state.staged_data:
-            info = state.staged_data[img_path]
-            # Calculate destination path
-            dest_path = os.path.join(state.output_dir, info['name'])
-            tagged_batch.append((img_path, info['cat'], dest_path))
+    committed = SorterEngine.commit_batch(batch, state.output_dir, state.cleanup_mode, state.batch_mode)
 
-    SorterEngine.commit_batch(batch, state.output_dir, state.cleanup_mode, state.batch_mode)
-
-    # Caption on apply if enabled
-    if state.caption_on_apply and tagged_batch:
+    # Caption on apply if enabled - uses actual dest paths from commit
+    if state.caption_on_apply and committed:
         state.load_caption_settings()
         caption_count = 0
-        for orig_path, category, dest_path in tagged_batch:
+        for orig_path, info in committed.items():
+            dest_path = info['dest']
             if os.path.exists(dest_path):
-                prompt = SorterEngine.get_category_prompt(state.profile_name, category)
+                prompt = SorterEngine.get_category_prompt(state.profile_name, info['cat'])
                 caption, error = await run.io_bound(
                     SorterEngine.caption_image_vllm,
                     dest_path, prompt, state.caption_settings
@@ -753,14 +745,7 @@ async def action_apply_global():
     """Apply all staged changes globally."""
     ui.notify("Starting global apply... This may take a while.", type='info')
 
-    # Capture staged data before commit for captioning
-    staged_before_commit = {}
-    if state.caption_on_apply:
-        for img_path, info in state.staged_data.items():
-            dest_path = os.path.join(state.output_dir, info['name'])
-            staged_before_commit[img_path] = {'cat': info['cat'], 'dest': dest_path}
-
-    await run.io_bound(
+    committed = await run.io_bound(
         SorterEngine.commit_global,
         state.output_dir,
         state.cleanup_mode,
@@ -769,13 +754,13 @@ async def action_apply_global():
         state.profile_name
     )
 
-    # Caption on apply if enabled
-    if state.caption_on_apply and staged_before_commit:
+    # Caption on apply if enabled - uses actual dest paths from commit
+    if state.caption_on_apply and committed:
         state.load_caption_settings()
-        ui.notify(f"Captioning {len(staged_before_commit)} images...", type='info')
+        ui.notify(f"Captioning {len(committed)} images...", type='info')
 
         caption_count = 0
-        for orig_path, info in staged_before_commit.items():
+        for orig_path, info in committed.items():
             dest_path = info['dest']
             if os.path.exists(dest_path):
                 prompt = SorterEngine.get_category_prompt(state.profile_name, info['cat'])
